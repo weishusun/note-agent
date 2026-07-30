@@ -16,16 +16,18 @@ from app.vault.store import VaultStore
 # 与 SCHEMA.md 第 4 节一字不差
 _SCHEMA_SQL = """
 CREATE TABLE notes (
-  path          TEXT PRIMARY KEY,   -- 相对 vault 根，如 notes/RAG 检索增强生成.md
-  title         TEXT NOT NULL,
-  category      TEXT,
-  tags          TEXT NOT NULL,      -- JSON array
-  aliases       TEXT NOT NULL,      -- JSON array
-  summary       TEXT NOT NULL,
-  status        TEXT NOT NULL,
-  confidence    REAL NOT NULL,
-  content_hash  TEXT NOT NULL,
-  updated       TEXT NOT NULL
+  path              TEXT PRIMARY KEY,   -- 相对 vault 根
+  title             TEXT NOT NULL,
+  category          TEXT,
+  suggested_domain  TEXT,
+  tags              TEXT NOT NULL,      -- JSON array
+  aliases           TEXT NOT NULL,      -- JSON array
+  summary           TEXT NOT NULL,
+  status            TEXT NOT NULL,
+  verified          INTEGER NOT NULL,   -- 0/1
+  confidence        REAL NOT NULL,
+  content_hash      TEXT NOT NULL,
+  updated           TEXT NOT NULL
 );
 
 CREATE TABLE ingest_log (
@@ -89,16 +91,19 @@ class SearchIndex:
         conn.execute("DELETE FROM notes WHERE path = ?", (path,))
         conn.execute(
             "INSERT INTO notes"
-            " (path, title, category, tags, aliases, summary, status, confidence, content_hash, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (path, title, category, suggested_domain, tags, aliases, summary, status,"
+            "  verified, confidence, content_hash, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 fm.title,
                 fm.category,
+                fm.suggested_domain,
                 json.dumps(fm.tags, ensure_ascii=False),
                 json.dumps(fm.aliases, ensure_ascii=False),
                 fm.summary,
                 fm.status,
+                int(fm.verified),
                 fm.confidence,
                 content_hash(note),
                 fm.updated.isoformat(),

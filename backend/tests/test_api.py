@@ -17,7 +17,12 @@ def client(vault_root: Path, store: VaultStore, index: SearchIndex) -> TestClien
     store.create_note(note)
     index.upsert_note(note)
     inbox_note = make_note(
-        title="检索增强踩坑记录", category=None, status="inbox", confidence=0.4, aliases=[]
+        title="检索增强踩坑记录",
+        category=None,
+        status="inbox",
+        confidence=0.4,
+        suggested_domain="检索技术",
+        aliases=[],
     )
     store.create_note(inbox_note)
     index.upsert_note(inbox_note)
@@ -40,7 +45,18 @@ def test_get_search(client: TestClient) -> None:
     assert data["matched_category"] is None
     ref = data["results"][0]
     assert ref["path"] == "notes/RAG 检索增强生成.md"
-    assert set(ref) == {"path", "title", "category", "tags", "summary", "updated", "confidence"}
+    assert set(ref) == {
+        "path",
+        "title",
+        "category",
+        "suggested_domain",
+        "tags",
+        "summary",
+        "status",
+        "verified",
+        "updated",
+        "confidence",
+    }
 
     resp = client.get("/api/search", params={"q": "", "category": "ai-engineering/rag"})
     assert resp.json()["matched_category"] == "ai-engineering/rag"
@@ -57,6 +73,17 @@ def test_search_include_inbox_param(client: TestClient) -> None:
         "RAG 检索增强生成",
         "检索增强踩坑记录",
     ]
+
+
+def test_get_inbox_returns_only_inbox_notes(client: TestClient) -> None:
+    resp = client.get("/api/inbox")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [r["title"] for r in data] == ["检索增强踩坑记录"]
+    assert data[0]["status"] == "inbox"
+    assert data[0]["suggested_domain"] == "检索技术"
+    # active 笔记（RAG 检索增强生成）不得出现
+    assert all(r["status"] == "inbox" for r in data)
 
 
 def test_get_note(client: TestClient) -> None:

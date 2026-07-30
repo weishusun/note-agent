@@ -37,13 +37,16 @@ def test_invalid_category_goes_to_inbox(store: VaultStore, taxonomy) -> None:
     assert not taxonomy.is_valid_category("no-such/leaf")
     assert not taxonomy.is_valid_category("ai-engineering")  # parent 单独出现算非法
 
-    note = make_note(category=None, status="inbox", confidence=0.3)
+    note = make_note(
+        category=None, status="inbox", confidence=0.3, suggested_domain="检索技术"
+    )
     rel = store.create_note(note)
 
     assert rel.parts[0] == "inbox"
     read_back = store.read_note(rel)
     assert read_back.frontmatter.status == "inbox"
     assert read_back.frontmatter.category is None
+    assert read_back.frontmatter.suggested_domain == "检索技术"
 
 
 def test_filename_sanitized(store: VaultStore) -> None:

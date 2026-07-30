@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Status = Literal["active", "inbox", "archived"]
-SourceKind = Literal["screenshot", "text", "url"]
+SourceKind = Literal["screenshot", "text", "url", "file", "generated"]
 
 
 class SourceRef(BaseModel):
@@ -27,10 +27,13 @@ class NoteFrontmatter(BaseModel):
 
     title: str = Field(min_length=1, max_length=60)
     category: str | None
+    # 全系统唯一允许模型自由生成的字段，不进 taxonomy，只作聚类线索（SCHEMA 3.1）
+    suggested_domain: str | None
     tags: list[str] = Field(max_length=6)
     aliases: list[str]
     summary: str = Field(min_length=1, max_length=50)
     status: Status
+    verified: bool
     confidence: float = Field(ge=0.0, le=1.0)
     created: datetime
     updated: datetime
@@ -44,9 +47,18 @@ class NoteFrontmatter(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _category_null_only_when_inbox(self) -> "NoteFrontmatter":
-        if self.category is None and self.status != "inbox":
-            raise ValueError("category 为 null 时 status 必须是 inbox")
+    def _cross_field_rules(self) -> "NoteFrontmatter":
+        if self.category is None:
+            if self.status != "inbox":
+                raise ValueError("category 为 null 时 status 必须是 inbox")
+            if self.suggested_domain is None:
+                raise ValueError("category 为 null 时 suggested_domain 必填")
+            if not 2 <= len(self.suggested_domain) <= 8:
+                raise ValueError("suggested_domain 必须是 2–8 字")
+        elif self.suggested_domain is not None:
+            raise ValueError("category 有值时 suggested_domain 必须为 null")
+        if self.source.kind == "generated" and self.verified:
+            raise ValueError("source.kind=generated 时 verified 必须为 false")
         return self
 
 
@@ -61,8 +73,11 @@ class NoteRef(BaseModel):
     path: str
     title: str
     category: str | None
+    suggested_domain: str | None
     tags: list[str]
     summary: str
+    status: Status
+    verified: bool
     updated: datetime
     confidence: float
 
@@ -75,8 +90,11 @@ class NoteRef(BaseModel):
             path=note.path.as_posix(),
             title=fm.title,
             category=fm.category,
+            suggested_domain=fm.suggested_domain,
             tags=fm.tags,
             summary=fm.summary,
+            status=fm.status,
+            verified=fm.verified,
             updated=fm.updated,
             confidence=fm.confidence,
         )

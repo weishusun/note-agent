@@ -18,7 +18,8 @@ _RANK_FTS = 2
 _RANK_BROWSE = 3
 
 _ROW_COLUMNS = (
-    "path, title, category, tags, aliases, summary, status, confidence, updated"
+    "path, title, category, suggested_domain, tags, aliases, summary, status,"
+    " verified, confidence, updated"
 )
 
 
@@ -62,39 +63,49 @@ def search(
     return [ref for _key, ref in scored[:limit]]
 
 
+def list_inbox(index: SearchIndex) -> list[NoteRef]:
+    """GET /api/inbox：全部 status=inbox 的笔记，按 updated 倒序。"""
+    with index.connect() as conn:
+        cursor = conn.execute(
+            f"SELECT {_ROW_COLUMNS} FROM notes WHERE status = 'inbox' ORDER BY updated DESC"
+        )
+        return [_to_ref(row) for row in _dict_rows(cursor)]
+
+
 def _to_ref(row: dict) -> NoteRef:
     return NoteRef(
         path=row["path"],
         title=row["title"],
         category=row["category"],
+        suggested_domain=row["suggested_domain"],
         tags=row["tags"],
         summary=row["summary"],
+        status=row["status"],
+        verified=bool(row["verified"]),
         updated=row["updated"],
         confidence=row["confidence"],
     )
 
 
+def _dict_rows(cursor: sqlite3.Cursor) -> list[dict]:
+    columns = [c.strip() for c in _ROW_COLUMNS.split(",")]
+    rows = []
+    for values in cursor:
+        row = dict(zip(columns, values))
+        row["tags"] = json.loads(row["tags"])
+        row["aliases"] = json.loads(row["aliases"])
+        rows.append(row)
+    return rows
+
+
 def _fetch_rows(conn: sqlite3.Connection, paths: list[str]) -> dict[str, dict]:
-    rows: dict[str, dict] = {}
     if not paths:
-        return rows
+        return {}
     placeholders = ", ".join("?" for _ in paths)
     cursor = conn.execute(
         f"SELECT {_ROW_COLUMNS} FROM notes WHERE path IN ({placeholders})", paths
     )
-    for path, title, cat, tags, aliases, summary, status, confidence, updated in cursor:
-        rows[path] = {
-            "path": path,
-            "title": title,
-            "category": cat,
-            "tags": json.loads(tags),
-            "aliases": json.loads(aliases),
-            "summary": summary,
-            "status": status,
-            "confidence": confidence,
-            "updated": updated,
-        }
-    return rows
+    return {row["path"]: row for row in _dict_rows(cursor)}
 
 
 def _better(hits: dict[str, tuple[int, float]], path: str, rank: int, score: float) -> None:
@@ -104,11 +115,19 @@ def _better(hits: dict[str, tuple[int, float]], path: str, rank: int, score: flo
 
 
 def _recall_exact(conn: sqlite3.Connection, q: str, hits: dict[str, tuple[int, float]]) -> None:
-    for (path,) in conn.execute("SELECT path FROM notes WHERE title = ?", (q,)):
+    # 精确档大小写不敏感（SCHEMA 不变量 12），COLLATE NOCASE 只折叠 ASCII，中文不受影响
+    for (path,) in conn.execute(
+        "SELECT path FROM notes WHERE title = ? COLLATE NOCASE", (q,)
+    ):
         _better(hits, path, _RANK_TITLE_EXACT, 0.0)
-    for path, aliases_json in conn.execute("SELECT path, aliases FROM notes"):
-        if q in json.loads(aliases_json):
-            _better(hits, path, _RANK_ALIAS_EXACT, 0.0)
+    # json_each 展开后逐项等值比较。
+    # 不允许对 aliases 列做 LIKE 子串匹配（"RAG" 会误中 "storage" 的子串 "rag"）
+    for (path,) in conn.execute(
+        "SELECT DISTINCT notes.path FROM notes, json_each(notes.aliases)"
+        " WHERE json_each.value = ? COLLATE NOCASE",
+        (q,),
+    ):
+        _better(hits, path, _RANK_ALIAS_EXACT, 0.0)
 
 
 def _recall_fts(conn: sqlite3.Connection, q: str, hits: dict[str, tuple[int, float]]) -> None:

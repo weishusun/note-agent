@@ -67,11 +67,14 @@ def index(store: VaultStore) -> SearchIndex:
 def make_note(
     title: str = "RAG 检索增强生成",
     category: str | None = "ai-engineering/rag",
+    suggested_domain: str | None = None,
     tags: list[str] | None = None,
     aliases: list[str] | None = None,
     summary: str = "在生成前先检索相关片段，拼进上下文再作答。",
     status: str = "active",
+    verified: bool = True,
     confidence: float = 0.86,
+    kind: str = "text",
     body: str = "## 一句话\n在生成前先检索相关片段，拼进上下文再作答。\n\n## 要点\n- 检索质量决定上限\n",
 ) -> Note:
     now = datetime(2026, 7, 30, 14, 22, 11, tzinfo=TZ)
@@ -79,14 +82,16 @@ def make_note(
         frontmatter=NoteFrontmatter(
             title=title,
             category=category,
+            suggested_domain=suggested_domain,
             tags=tags if tags is not None else ["向量检索"],
             aliases=aliases if aliases is not None else ["检索增强", "RAG"],
             summary=summary,
             status=status,
+            verified=verified,
             confidence=confidence,
             created=now,
             updated=now,
-            source=SourceRef(kind="text", ref="原文前 100 字……"),
+            source=SourceRef(kind=kind, ref="原文前 100 字……"),
         ),
         body=body,
     )

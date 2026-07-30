@@ -1,7 +1,9 @@
 """index.py / query.py：中文全文检索、重建、排序、过滤。"""
 
+import pytest
+
 from app.search.index import SearchIndex
-from app.search.query import search
+from app.search.query import _RANK_ALIAS_EXACT, _RANK_TITLE_EXACT, _recall_exact, search
 from app.vault.store import VaultStore
 from tests.conftest import make_note
 
@@ -123,6 +125,7 @@ def test_inbox_hidden_by_default_and_ranked_last(store: VaultStore, index: Searc
         category=None,
         status="inbox",
         confidence=0.3,
+        suggested_domain="缓存策略",
         summary="低置信度的缓存失效碎片。",
         aliases=[],
     )
@@ -142,6 +145,7 @@ def test_rebuild_keeps_inbox_notes(store: VaultStore, index: SearchIndex) -> Non
         category=None,
         status="inbox",
         confidence=0.3,
+        suggested_domain="检索技术",
         aliases=[],
     )
 
@@ -166,6 +170,124 @@ def test_limit_caps_results(store: VaultStore, index: SearchIndex) -> None:
 
     assert len(search(index, "缓存条目")) == 20  # 默认 limit=20
     assert len(search(index, "缓存条目", limit=5)) == 5
+
+
+def test_search_never_reads_note_files(
+    store: VaultStore, index: SearchIndex, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归护栏：NoteRef 完全从索引构造（SCHEMA 第 4 节），search 不得回读笔记文件。"""
+    for i in range(25):
+        _create_and_index(
+            store,
+            index,
+            title=f"缓存条目笔记 {i + 1:02d}",
+            summary="批量生成的缓存条目测试笔记。",
+            aliases=[],
+        )
+
+    read_calls: list[object] = []
+
+    def spy_read_note(self: VaultStore, rel_path: object) -> None:
+        read_calls.append(rel_path)
+        raise AssertionError("search 不允许读笔记文件")
+
+    monkeypatch.setattr(VaultStore, "read_note", spy_read_note)
+
+    results = search(index, "缓存条目")
+    assert len(results) == 20
+    assert read_calls == []
+
+
+def test_alias_match_is_exact_not_substring(store: VaultStore, index: SearchIndex) -> None:
+    """别名档必须是等值比较："RAG" 不得因 LIKE 大小写不敏感的子串匹配误中 "storage"。"""
+    with_alias = _create_and_index(
+        store, index, title="检索增强生成", aliases=["RAG"]
+    )
+    with_storage = _create_and_index(
+        store,
+        index,
+        title="存储引擎选型",
+        category="ai-engineering/agent",
+        tags=[],
+        aliases=["storage"],
+        summary="对比几类存储引擎的取舍。",
+        body="## 一句话\n对比几类存储引擎的取舍。\n",
+    )
+
+    # "storage" 的 trigram 含 "rag"，允许它经 FTS 档召回，但只能排在别名精确档之后
+    results = search(index, "RAG")
+    assert [r.title for r in results] == ["检索增强生成", "存储引擎选型"]
+
+    # 别名档本身绝不允许命中 "storage"
+    hits: dict[str, tuple[int, float]] = {}
+    with index.connect() as conn:
+        _recall_exact(conn, "RAG", hits)
+    assert with_storage.path is not None and with_alias.path is not None
+    assert with_storage.path.as_posix() not in hits
+    assert hits[with_alias.path.as_posix()] == (_RANK_ALIAS_EXACT, 0.0)
+
+
+def test_exact_match_is_case_insensitive(store: VaultStore, index: SearchIndex) -> None:
+    """SCHEMA 不变量 12：精确档（标题、别名）大小写不敏感。"""
+    note = _create_and_index(
+        store,
+        index,
+        title="LangGraph 状态机",
+        category="ai-engineering/agent",
+        tags=["LangGraph", "状态管理"],
+        aliases=["RAG"],
+        summary="用 LangGraph 建模带状态的执行图。",
+        body="## 一句话\n用 LangGraph 建模带状态的执行图。\n",
+    )
+    assert note.path is not None
+    path = note.path.as_posix()
+
+    with index.connect() as conn:
+        title_hits: dict[str, tuple[int, float]] = {}
+        _recall_exact(conn, "langgraph 状态机", title_hits)
+        assert title_hits[path] == (_RANK_TITLE_EXACT, 0.0)
+
+        alias_hits: dict[str, tuple[int, float]] = {}
+        _recall_exact(conn, "rag", alias_hits)
+        assert alias_hits[path] == (_RANK_ALIAS_EXACT, 0.0)
+
+    # 端到端也能命中
+    assert [r.title for r in search(index, "langgraph 状态机")] == ["LangGraph 状态机"]
+
+
+def test_rebuild_preserves_suggested_domain_and_verified(
+    store: VaultStore, index: SearchIndex
+) -> None:
+    active = _create_and_index(store, index)  # verified=True, suggested_domain=None
+    generated = _create_and_index(
+        store,
+        index,
+        title="角动量算符的对易关系",
+        category=None,
+        status="inbox",
+        confidence=0.3,
+        suggested_domain="量子力学",
+        verified=False,
+        kind="generated",
+        tags=[],
+        aliases=[],
+        summary="三个角动量分量互不对易。",
+        body="## 要点\n（待补充）\n\n## 待核实\n> 以下内容由模型生成，尚未核实。\n\n- [Lx, Ly] = iħLz\n",
+    )
+    assert active.path is not None and generated.path is not None
+
+    index.db_path.unlink()
+    assert index.rebuild_all() == 2
+
+    with index.connect() as conn:
+        rows = dict(
+            conn.execute("SELECT path, suggested_domain FROM notes").fetchall()
+        )
+        assert rows[generated.path.as_posix()] == "量子力学"
+        assert rows[active.path.as_posix()] is None
+        verified = dict(conn.execute("SELECT path, verified FROM notes").fetchall())
+        assert verified[generated.path.as_posix()] == 0
+        assert verified[active.path.as_posix()] == 1
 
 
 def test_remove_note(store: VaultStore, index: SearchIndex) -> None:

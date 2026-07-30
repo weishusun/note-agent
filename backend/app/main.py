@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Query
 
 from app.config import default_vault_root
 from app.search.index import SearchIndex
-from app.search.query import search
+from app.search.query import list_inbox, search
 from app.vault.models import NoteRef, Taxonomy
 from app.vault.store import VaultStore
 from app.vault.taxonomy import TaxonomyManager
@@ -39,6 +39,10 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         )
         matched = category if taxonomy.is_valid_category(category) else None
         return {"results": results, "matched_category": matched}
+
+    @app.get("/api/inbox")
+    def api_inbox() -> list[NoteRef]:
+        return list_inbox(index)
 
     @app.get("/api/notes/{path:path}")
     def api_note(path: str) -> dict[str, object]:
