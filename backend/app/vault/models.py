@@ -57,8 +57,9 @@ class NoteFrontmatter(BaseModel):
                 raise ValueError("suggested_domain 必须是 2–8 字")
         elif self.suggested_domain is not None:
             raise ValueError("category 有值时 suggested_domain 必须为 null")
-        if self.source.kind == "generated" and self.verified:
-            raise ValueError("source.kind=generated 时 verified 必须为 false")
+        # verified 与 source.kind 相互独立，不得互相推导（SCHEMA 2.2）。
+        # 「创建时一律 false」由 store.create_note 在写入层强制，模型层允许 True，
+        # 因为读回已人工核实的笔记时需要
         return self
 
 

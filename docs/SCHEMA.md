@@ -81,7 +81,7 @@ source:
 | `aliases` | list[str] | ✅ | 可为空。导航层的一等公民,尽量多填,含英文名和缩写 |
 | `summary` | str | ✅ | ≤ 50 字,一句话 |
 | `status` | enum | ✅ | `active` \| `inbox` \| `archived` |
-| `verified` | bool | ✅ | 内容是否经人确认。`source.kind=generated` 时**必须**为 `false`,其余来源为 `true` |
+| `verified` | bool | ✅ | 人是否确认过本条内容。**创建时一律 false,任何来源都一样。**只有人工操作可翻为 true。`source.kind` 记录来源且不可变,两者是独立的两件事,不得互相推导 |
 | `confidence` | float | ✅ | 0–1,**分类**置信度(不是内容置信度) |
 | `created` / `updated` | ISO8601 带时区 | ✅ | 本地时区 |
 | `source.kind` | enum | ✅ | `screenshot` \| `text` \| `url` \| `file` \| `generated` |
@@ -347,5 +347,5 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 8. `ingest` 前先算输入 SHA256,命中 `ingest_log` 直接返回已有结果,不重复处理
 9. 写笔记文件用「先写临时文件再原子 rename」,不允许原地半写
 10. `confidence < 0.6` → 强制 `inbox`(阈值待 eval 校准后确定)
-11. **`source.kind=generated` 的笔记 `verified` 必须为 `false`**,内容必须隔离在 `## 待核实` 区块
+11. 任何来源的笔记**创建时** `verified` 必须为 `false`。`verified` 只能由人工操作翻为 `true`,录入循环和整理循环都不得写入 `true`
 12. 精确匹配档(标题、别名)**大小写不敏感**;FTS 档不受此约束

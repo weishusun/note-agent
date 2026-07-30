@@ -25,10 +25,10 @@ def test_suggested_domain_length_2_to_8() -> None:
     assert ok.frontmatter.suggested_domain == "量子力学"
 
 
-def test_generated_must_not_be_verified() -> None:
-    with pytest.raises(ValidationError, match="verified 必须为 false"):
-        make_note(kind="generated", verified=True)
-    ok = make_note(kind="generated", verified=False)
-    assert ok.frontmatter.verified is False
-    # 其余来源允许 verified=True
-    assert make_note(kind="screenshot", verified=True).frontmatter.verified is True
+def test_verified_independent_of_source_kind() -> None:
+    """verified 与 source.kind 互相独立（SCHEMA 2.2）。模型层任意组合都合法：
+    「创建时一律 false」是 store.create_note 写入层的职责，不在模型层。"""
+    for kind in ("screenshot", "text", "url", "file", "generated"):
+        for verified in (True, False):
+            note = make_note(kind=kind, verified=verified)
+            assert note.frontmatter.verified is verified

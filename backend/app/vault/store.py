@@ -106,7 +106,13 @@ class VaultStore:
         return paths
 
     def create_note(self, note: Note) -> Path:
-        """只创建新文件，绝不覆盖。status=inbox 落 inbox/，其余落 notes/。"""
+        """只创建新文件，绝不覆盖。status=inbox 落 inbox/，其余落 notes/。
+
+        不变量 11：任何来源创建时 verified 一律 false，传入值被忽略，
+        只有人工编辑文件才能翻为 true。
+        """
+        if note.frontmatter.verified:
+            note.frontmatter = note.frontmatter.model_copy(update={"verified": False})
         fm = note.frontmatter
         directory = self.inbox_dir if fm.status == "inbox" else self.notes_dir
         stem = sanitize_filename(fm.title)

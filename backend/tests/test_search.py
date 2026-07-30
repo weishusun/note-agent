@@ -258,7 +258,7 @@ def test_exact_match_is_case_insensitive(store: VaultStore, index: SearchIndex) 
 def test_rebuild_preserves_suggested_domain_and_verified(
     store: VaultStore, index: SearchIndex
 ) -> None:
-    active = _create_and_index(store, index)  # verified=True, suggested_domain=None
+    active = _create_and_index(store, index)  # 创建时 verified 被强制 false
     generated = _create_and_index(
         store,
         index,
@@ -267,7 +267,6 @@ def test_rebuild_preserves_suggested_domain_and_verified(
         status="inbox",
         confidence=0.3,
         suggested_domain="量子力学",
-        verified=False,
         kind="generated",
         tags=[],
         aliases=[],
@@ -275,6 +274,11 @@ def test_rebuild_preserves_suggested_domain_and_verified(
         body="## 要点\n（待补充）\n\n## 待核实\n> 以下内容由模型生成，尚未核实。\n\n- [Lx, Ly] = iħLz\n",
     )
     assert active.path is not None and generated.path is not None
+
+    # 人工核实 active 笔记：手工把文件里的 verified 翻成 true
+    target = store.root / active.path
+    text = target.read_text(encoding="utf-8")
+    target.write_text(text.replace("verified: false", "verified: true"), encoding="utf-8")
 
     index.db_path.unlink()
     assert index.rebuild_all() == 2
@@ -286,8 +290,8 @@ def test_rebuild_preserves_suggested_domain_and_verified(
         assert rows[generated.path.as_posix()] == "量子力学"
         assert rows[active.path.as_posix()] is None
         verified = dict(conn.execute("SELECT path, verified FROM notes").fetchall())
+        assert verified[active.path.as_posix()] == 1  # 人工核实过的重建后仍为 true
         assert verified[generated.path.as_posix()] == 0
-        assert verified[active.path.as_posix()] == 1
 
 
 def test_remove_note(store: VaultStore, index: SearchIndex) -> None:
