@@ -6,13 +6,17 @@
 重试策略:
 - 结构化输出解析失败 → 重试一次,仍失败抛 ExtractError(对两个函数都适用)。
 - classify 额外的语义重试:模型给的 category 不在叶子表里、或 category 为 null 时
-  suggested_domain 长度不在 2-8 字 → 再问一次;仍不合法则把 category 规整成 null。
+  suggested_domain 不是合法领域名(缺失 / 字符串 "null" / 长度不在 2-8 字)→ 再问一次。
+  非法 category 最终规整成 null;但 suggested_domain 重试后仍缺失则**抛 ExtractError**,
+  不静默放行——这个字段缺了整个冷启动就废了。
+- 字符串 "null"/"none"/"" 一律先归一为 None(有些模型会把 JSON null 写成字符串)。
 
 所有对模型的调用都用 with_structured_output(..., include_raw=True),
 raw 那一路用来读 usage_metadata(token 消耗),parsed 那一路是校验后的对象。
 """
 
 import base64
+import logging
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -21,7 +25,14 @@ from app.extract.client import bind_structured, get_classify_model, get_extract_
 from app.extract.models import ClassifyResult, NoteDraft
 from pydantic import BaseModel, ConfigDict, Field
 
+logger = logging.getLogger(__name__)
+
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+# 有些模型会把 JSON null 误写成字符串;统一按缺失处理
+_NULL_STRINGS = {"null", "none", "nil", ""}
+# suggested_domain 的合法长度(汉字数)
+_DOMAIN_MIN, _DOMAIN_MAX = 2, 8
 
 
 class ExtractError(RuntimeError):
@@ -52,7 +63,22 @@ def extract_drafts(
     runnable = bind_structured(model, _DraftBatch)
     messages = _extract_messages(image, text)
     batch, usage = _invoke_structured(runnable, messages, _model_id(model))
+    for draft in batch.drafts:
+        _warn_draft_quality(draft)
     return batch.drafts, usage
+
+
+def _warn_draft_quality(draft: NoteDraft) -> None:
+    """非阻断的质量提示。别名本该是可独立检索的短词,过长通常意味着模型把
+    「缩写(全称)」塞成了一条,而不是拆开——只告警,不改数据、不拦。"""
+    for alias in draft.aliases:
+        if len(alias) > 20:
+            logger.warning(
+                "draft %r 的 alias 过长(%d 字),疑似未拆成可独立检索的短词: %r",
+                draft.title,
+                len(alias),
+                alias,
+            )
 
 
 def classify(
@@ -69,13 +95,42 @@ def classify(
     model_id = _model_id(model)
 
     raw, usage = _invoke_structured(runnable, messages, model_id)
+    raw = _normalize(raw)
     if _needs_retry(raw, leaves):
-        raw, again = _invoke_structured(runnable, messages, model_id)
+        raw2, again = _invoke_structured(runnable, messages, model_id)
+        raw = _normalize(raw2)
         usage = _add_usage(usage, again)
+
+    # 降级到 suggested_domain 路径却拿不到合法领域名 → 抛,不静默放行
+    if _effective_category(raw, leaves) is None and not _valid_domain(raw.suggested_domain):
+        raise ExtractError(
+            "分类降级为 suggested_domain,但模型重试后仍未给出合法领域名"
+            f"(需 {_DOMAIN_MIN}-{_DOMAIN_MAX} 字)。模型原始返回: {raw.model_dump()}"
+        )
     return _finalize(raw, leaves, tags), usage
 
 
 # ---------- 分类后置校验 ----------
+
+
+def _null_to_none(value: str | None) -> str | None:
+    """把字符串 "null"/"none"/"" 等归一为 None(模型偶尔把 JSON null 写成字符串)。"""
+    if value is None:
+        return None
+    return None if value.strip().lower() in _NULL_STRINGS else value
+
+
+def _normalize(raw: ClassifyResult) -> ClassifyResult:
+    return raw.model_copy(
+        update={
+            "category": _null_to_none(raw.category),
+            "suggested_domain": _null_to_none(raw.suggested_domain),
+        }
+    )
+
+
+def _valid_domain(sd: str | None) -> bool:
+    return sd is not None and _DOMAIN_MIN <= len(sd) <= _DOMAIN_MAX
 
 
 def _effective_category(raw: ClassifyResult, leaves: list[str]) -> str | None:
@@ -86,15 +141,14 @@ def _effective_category(raw: ClassifyResult, leaves: list[str]) -> str | None:
 
 
 def _needs_retry(raw: ClassifyResult, leaves: list[str]) -> bool:
+    """传入的 raw 已归一化(字符串 "null" → None)。"""
     eff = _effective_category(raw, leaves)
-    # 模型给了 category 但不合法 → 再问一次
+    # 模型给了 category 但不在叶子表里 → 再问一次
     if raw.category is not None and eff is None:
         return True
-    # 走 suggested_domain 路径但长度不合规 → 再问一次
-    if eff is None:
-        sd = raw.suggested_domain or ""
-        if not 2 <= len(sd) <= 8:
-            return True
+    # 走 suggested_domain 路径,但领域名缺失 / 长度不合规 → 再问一次
+    if eff is None and not _valid_domain(raw.suggested_domain):
+        return True
     return False
 
 
@@ -203,16 +257,25 @@ def _classify_messages(
     tags: list[str],
     known_domains: list[tuple[str, int]],
 ) -> list:
-    template = _load_prompt("classify_zh.md")
-    body = template.format(
+    """按 leaves 是否为空择一注入两套任务描述:
+    - 非空:选分类(classify_zh.md)
+    - 为空:完全不提分类,只给学科领域标签(classify_domain_zh.md)。
+      混着提「分类」会让模型按选分类思考、然后干脆不给 suggested_domain。
+    """
+    common = dict(
         title=draft.title,
         summary=draft.summary,
         points="\n".join(f"- {p}" for p in draft.points),
         related="、".join(draft.related) or "(无)",
-        leaves=_render_enum(leaves, "(当前没有任何分类叶子,请直接走 suggested_domain)"),
         tags=_render_enum(tags, "(当前没有可用标签)"),
         known_domains=_render_domains(known_domains),
     )
+    if leaves:
+        body = _load_prompt("classify_zh.md").format(
+            leaves=_render_enum(leaves, ""), **common
+        )
+    else:
+        body = _load_prompt("classify_domain_zh.md").format(**common)
     return [HumanMessage(content=body)]
 
 
