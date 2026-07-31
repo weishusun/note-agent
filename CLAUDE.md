@@ -22,3 +22,5 @@
 - 当前顺序：提取层（纯函数，不写盘）→ LangGraph 编排 → 写入 API → 前端
 - 阶段 3 中，文件输入 / PDF / generated 骨架模式暂缓，第一版只支持
   screenshot 和短文本两条路
+- 本项目在 Windows PowerShell 下开发。执行 git commit 等需要多行文本的命令时，
+  一律用 bash heredoc，禁止使用 PowerShell here-string 语法（@'...'@）

@@ -17,7 +17,6 @@ suggested_domain 加进 known_domains 再处理下一个——测的是冷启动
 
 import argparse
 import json
-import os
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from pathlib import Path
 
 import yaml
 
+from app import config
 from app.config import default_vault_root
 from app.extract.extractor import classify, extract_drafts
 from app.extract.models import ClassifyResult, ExtractResult
@@ -287,8 +287,8 @@ def main() -> None:
 
     results = process(fixtures, leaves, tags, args.extract_model, args.classify_model)
 
-    extract_model = args.extract_model or os.environ.get("EXTRACT_MODEL", "?")
-    classify_model = args.classify_model or os.environ.get("CLASSIFY_MODEL", "?")
+    extract_model = args.extract_model or config.EXTRACT_MODEL or "?"
+    classify_model = args.classify_model or config.CLASSIFY_MODEL or "?"
     report = build_report(results, extract_model, classify_model, taxonomy_empty)
 
     _RESULTS.mkdir(parents=True, exist_ok=True)

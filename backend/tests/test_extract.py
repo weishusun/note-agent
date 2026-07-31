@@ -51,8 +51,11 @@ class _FakeModel:
     def __init__(self, runnable: _FakeRunnable) -> None:
         self._runnable = runnable
 
-    def with_structured_output(self, schema: object, include_raw: bool = False):
+    def with_structured_output(
+        self, schema: object, method: str | None = None, include_raw: bool = False
+    ):
         self.schema = schema
+        self.method = method
         return self._runnable
 
 

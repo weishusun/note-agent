@@ -17,7 +17,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.extract.client import get_classify_model, get_extract_model
+from app.extract.client import bind_structured, get_classify_model, get_extract_model
 from app.extract.models import ClassifyResult, NoteDraft
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,7 +49,7 @@ def extract_drafts(
         raise ValueError("extract_drafts 需要 image 或非空 text 至少之一")
 
     model = get_extract_model(override)
-    runnable = model.with_structured_output(_DraftBatch, include_raw=True)
+    runnable = bind_structured(model, _DraftBatch)
     messages = _extract_messages(image, text)
     batch, usage = _invoke_structured(runnable, messages, _model_id(model))
     return batch.drafts, usage
@@ -64,7 +64,7 @@ def classify(
 ) -> tuple[ClassifyResult, dict]:
     """给单条草稿分类。leaves 为空是正常情况,直接走 suggested_domain 路径。"""
     model = get_classify_model(override)
-    runnable = model.with_structured_output(ClassifyResult, include_raw=True)
+    runnable = bind_structured(model, ClassifyResult)
     messages = _classify_messages(draft, leaves, tags, known_domains)
     model_id = _model_id(model)
 
