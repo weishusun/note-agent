@@ -24,3 +24,6 @@
   screenshot 和短文本两条路
 - 本项目在 Windows PowerShell 下开发。执行 git commit 等需要多行文本的命令时，
   一律用 bash heredoc，禁止使用 PowerShell here-string 语法（@'...'@）
+- 提交前必须先跑 git status 并复核。禁止无脑 git add -A —— 用显式路径添加本次
+  改动涉及的文件。如果 status 里出现你本次没有改过的删除或改名，停下来问我，
+  不要自行提交或恢复。
