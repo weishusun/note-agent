@@ -18,15 +18,13 @@ import sys
 import time
 
 from app import config
-from app.extract.client import bind_structured, get_classify_model, get_extract_model
+from app.extract.client import bind_structured, get_extract_model
 from app.extract.extractor import (
     _DraftBatch,
-    _classify_messages,
     _extract_messages,
-    _finalize,
     _image_mime,
+    classify_batch,
 )
-from app.extract.models import ClassifyResult
 from app.vault.taxonomy import TaxonomyManager
 
 
@@ -152,24 +150,21 @@ def main() -> None:
         print(f"  --- draft {i} ---")
         print(_pretty(draft))
 
-    # [5] classify(逐条)
+    # [5] classify —— 走 classify_batch:单次录入内逐条累积 known_domains,
+    #     后一条能看到前一条定的领域名,避免同一张图分出「AI工程」「人工智能」两个值。
     taxonomy = TaxonomyManager(config.default_vault_root() / "taxonomy.yaml")
     leaves = taxonomy.leaf_categories()
     tags = taxonomy.load().tags
-    print(f"\n[5] classify 原始响应 + 解析结果(叶子数={len(leaves)}, 标签数={len(tags)})")
-    cls_model = get_classify_model()
-    for i, draft in enumerate(drafts, 1):
-        runnable = bind_structured(cls_model, ClassifyResult)
-        messages = _classify_messages(draft, leaves, tags, [])
-        out = _invoke_verbose(runnable, messages, f"classify#{i}")
-        print(f"  --- draft {i} 原始响应 ---")
-        print(_raw_dump(out["raw"]))
-        _acc_usage(usage, out["raw"])
-        print(f"  --- draft {i} 解析结果(规整后) ---")
-        print(_pretty(_finalize(out["parsed"], leaves, tags)))
+    print(f"\n[5] classify_batch 解析结果(叶子数={len(leaves)}, 标签数={len(tags)})")
+    print("    (batch 路径不单独回传 raw/usage;解析失败时全文会随 ExtractError 抛出。")
+    print("     要逐条看原始响应,单独对某条 draft 调 classify)")
+    classifications = classify_batch(drafts, leaves, tags, [])
+    for i, cr in enumerate(classifications, 1):
+        print(f"  --- draft {i} 分类 ---")
+        print(_pretty(cr))
 
-    # [6] token
-    print("\n[6] token 用量")
+    # [6] token 用量(仅 extract;classify 走 batch 未单独回传 usage)
+    print("\n[6] token 用量(extract)")
     print(f"  input={usage['input_tokens']}  output={usage['output_tokens']}"
           f"  total={usage['input_tokens'] + usage['output_tokens']}")
 

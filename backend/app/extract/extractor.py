@@ -110,6 +110,29 @@ def classify(
     return _finalize(raw, leaves, tags), usage
 
 
+def classify_batch(
+    drafts: list[NoteDraft],
+    leaves: list[str],
+    tags: list[str],
+    known_domains: list[tuple[str, int]],
+) -> list[ClassifyResult]:
+    """对**同一次录入**产出的一批草稿逐条分类,每条处理完就把它的 suggested_domain
+    追加进 known_domains 再处理下一条。返回顺序与 drafts 一致。
+
+    否则同一张图出来的四条会各自新造近义领域名(如「AI工程」vs「人工智能」):
+    第一条定的领域后三条看不到,就分叉了。逐条累积让后来的草稿优先复用已定的领域名。
+    """
+    running: dict[str, int] = dict(known_domains)
+    results: list[ClassifyResult] = []
+    for draft in drafts:
+        snapshot = sorted(running.items(), key=lambda kv: (-kv[1], kv[0]))
+        result, _usage = classify(draft, leaves, tags, snapshot)
+        results.append(result)
+        if result.suggested_domain:
+            running[result.suggested_domain] = running.get(result.suggested_domain, 0) + 1
+    return results
+
+
 # ---------- 分类后置校验 ----------
 
 
@@ -189,7 +212,11 @@ class _ParseFailure(RuntimeError):
 
 
 def _invoke_structured(runnable, messages, model_id: str) -> tuple[BaseModel, dict]:
-    """调用一次,解析失败重试一次,仍失败抛 ExtractError。返回 (parsed, usage)。"""
+    """调用一次,解析失败重试一次,仍失败抛 ExtractError。返回 (parsed, usage)。
+
+    解析失败时把模型实际返回的全文带进异常,不只报「解析失败」——
+    失败现场看不见,排查就无从下手。
+    """
     last: Exception | None = None
     for _ in range(2):
         try:
@@ -198,17 +225,34 @@ def _invoke_structured(runnable, messages, model_id: str) -> tuple[BaseModel, di
             return parsed, _usage_from_raw(raw, model_id)
         except Exception as exc:  # 解析失败、校验失败、调用异常都重试一次
             last = exc
-    raise ExtractError("结构化输出解析失败,已重试一次仍失败") from last
+    raise ExtractError(f"结构化输出解析失败,已重试一次仍失败。最后一次: {last}") from last
 
 
 def _split_output(out: object) -> tuple[BaseModel, object]:
     """拆开 include_raw=True 的返回:{raw, parsed, parsing_error}。"""
     if isinstance(out, dict):
         if out.get("parsing_error") is not None or out.get("parsed") is None:
-            raise _ParseFailure(str(out.get("parsing_error")))
+            raise _ParseFailure(
+                f"parsing_error={out.get('parsing_error')!r}; "
+                f"模型返回: {_raw_text(out.get('raw'))}"
+            )
         return out["parsed"], out.get("raw")
     # 兜底:非 include_raw 直接是 parsed 对象
     return out, None  # type: ignore[return-value]
+
+
+def _raw_text(raw: object) -> str:
+    """尽量完整地把 raw 打成一行:function_calling 下 JSON 常在 tool_calls 里。"""
+    if raw is None:
+        return "(无 raw)"
+    parts = [f"content={getattr(raw, 'content', '')!r}"]
+    tool_calls = getattr(raw, "tool_calls", None)
+    if tool_calls:
+        parts.append(f"tool_calls={tool_calls}")
+    extra = getattr(raw, "additional_kwargs", None)
+    if extra:
+        parts.append(f"additional_kwargs={extra}")
+    return " ".join(parts)
 
 
 def _usage_from_raw(raw: object, model_id: str) -> dict:

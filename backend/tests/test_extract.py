@@ -198,7 +198,7 @@ def test_notedraft_length_constraints() -> None:
     with pytest.raises(ValidationError):
         _draft(summary="概" * 51)  # >50 字
     with pytest.raises(ValidationError):
-        _draft(points=["a", "b"])  # <3 条
+        _draft(points=[])  # 0 条(下限是 1)
     with pytest.raises(ValidationError):
         _draft(points=["a", "b", "c", "d", "e", "f", "g"])  # >6 条
     with pytest.raises(ValidationError):
@@ -321,3 +321,56 @@ def test_short_aliases_no_warning(caplog: pytest.LogCaptureFixture) -> None:
         extractor._warn_draft_quality(draft)
 
     assert caplog.records == []
+
+
+# ---------- points 条数下限放宽到 1 ----------
+
+
+def test_notedraft_allows_single_point() -> None:
+    d = _draft(points=["只说了一件事,就只写一条"])
+    assert d.points == ["只说了一件事,就只写一条"]
+
+
+def test_notedraft_rejects_zero_points() -> None:
+    with pytest.raises(ValidationError):
+        _draft(points=[])
+
+
+# ---------- classify_batch:单次录入内逐条累积领域 ----------
+
+
+def _fake_classify(returns_domain):
+    """替身:记录每次收到的 known_domains,按 returns_domain(draft)->str 产出结果。"""
+    seen: list[list[tuple[str, int]]] = []
+
+    def fake(draft, leaves, tags, known_domains, override=None):
+        seen.append(list(known_domains))
+        cr = ClassifyResult(
+            category=None, suggested_domain=returns_domain(draft), confidence=0.0
+        )
+        return cr, {"input_tokens": 0, "output_tokens": 0, "model": "x"}
+
+    return fake, seen
+
+
+def test_classify_batch_accumulates_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake, seen = _fake_classify(lambda draft: "量子力学")
+    monkeypatch.setattr(extractor, "classify", fake)
+
+    results = extractor.classify_batch(
+        [_draft(), _draft(title="泡利矩阵")], leaves=[], tags=[], known_domains=[]
+    )
+
+    assert len(results) == 2
+    assert seen[0] == []  # 第一条:还没有已知领域
+    assert ("量子力学", 1) in seen[1]  # 第二条:能看到第一条定的领域
+
+
+def test_classify_batch_preserves_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake, _seen = _fake_classify(lambda draft: draft.title)
+    monkeypatch.setattr(extractor, "classify", fake)
+
+    drafts = [_draft(title="甲组"), _draft(title="乙组"), _draft(title="丙组")]
+    results = extractor.classify_batch(drafts, leaves=[], tags=[], known_domains=[])
+
+    assert [r.suggested_domain for r in results] == ["甲组", "乙组", "丙组"]

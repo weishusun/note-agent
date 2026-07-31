@@ -16,7 +16,8 @@ class NoteDraft(BaseModel):
 
     title: str = Field(min_length=1, max_length=60)
     summary: str = Field(min_length=1, max_length=50)
-    points: list[str] = Field(min_length=3, max_length=6)
+    # 1-6 条:条数必须如实反映输入信息量,只说一件事就一条,不为凑数而重复标题
+    points: list[str] = Field(min_length=1, max_length=6)
     # 同义说法、英文全称、缩写。导航层的一等公民,尽量给全
     aliases: list[str] = Field(default_factory=list, max_length=5)
     # 输入里提到的其他概念名,用于后续建双链;不是本条的内容
