@@ -72,6 +72,21 @@ def list_inbox(index: SearchIndex) -> list[NoteRef]:
         return [_to_ref(row) for row in _dict_rows(cursor)]
 
 
+def distinct_suggested_domains(index: SearchIndex) -> list[tuple[str, int]]:
+    """inbox 笔记里各 suggested_domain 的计数,按计数倒序(同数按名字稳定排序)。
+
+    给整理循环/分类复用当聚类线索:分类时把它注入 prompt,让模型优先复用已有领域名,
+    这是冷启动能收敛的关键。只统计 status=inbox 的笔记(已归档的分类不再是候选领域)。
+    """
+    with index.connect() as conn:
+        rows = conn.execute(
+            "SELECT suggested_domain, COUNT(*) AS n FROM notes"
+            " WHERE status = 'inbox' AND suggested_domain IS NOT NULL"
+            " GROUP BY suggested_domain ORDER BY n DESC, suggested_domain"
+        ).fetchall()
+    return [(domain, count) for domain, count in rows]
+
+
 def _to_ref(row: dict) -> NoteRef:
     return NoteRef(
         path=row["path"],

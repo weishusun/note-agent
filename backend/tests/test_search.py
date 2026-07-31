@@ -3,7 +3,13 @@
 import pytest
 
 from app.search.index import SearchIndex
-from app.search.query import _RANK_ALIAS_EXACT, _RANK_TITLE_EXACT, _recall_exact, search
+from app.search.query import (
+    _RANK_ALIAS_EXACT,
+    _RANK_TITLE_EXACT,
+    _recall_exact,
+    distinct_suggested_domains,
+    search,
+)
 from app.vault.store import VaultStore
 from tests.conftest import make_note
 
@@ -292,6 +298,39 @@ def test_rebuild_preserves_suggested_domain_and_verified(
         verified = dict(conn.execute("SELECT path, verified FROM notes").fetchall())
         assert verified[active.path.as_posix()] == 1  # 人工核实过的重建后仍为 true
         assert verified[generated.path.as_posix()] == 0
+
+
+def test_distinct_suggested_domains(store: VaultStore, index: SearchIndex) -> None:
+    """按计数倒序,只统计 inbox 且 suggested_domain 非空的笔记。"""
+    for i in range(3):
+        _create_and_index(
+            store,
+            index,
+            title=f"量子碎片 {i}",
+            category=None,
+            status="inbox",
+            confidence=0.3,
+            suggested_domain="量子力学",
+            tags=[],
+            aliases=[],
+            summary="量子力学的碎片。",
+        )
+    _create_and_index(
+        store,
+        index,
+        title="缓存碎片",
+        category=None,
+        status="inbox",
+        confidence=0.3,
+        suggested_domain="缓存策略",
+        tags=[],
+        aliases=[],
+        summary="缓存的碎片。",
+    )
+    # active 笔记(有分类、suggested_domain 为 None)不计入
+    _create_and_index(store, index)
+
+    assert distinct_suggested_domains(index) == [("量子力学", 3), ("缓存策略", 1)]
 
 
 def test_remove_note(store: VaultStore, index: SearchIndex) -> None:
