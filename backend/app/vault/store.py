@@ -8,6 +8,7 @@
 import os
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import frontmatter as fm_lib
 import yaml
@@ -16,6 +17,9 @@ from app.vault.models import Note, NoteFrontmatter, NoteRef
 
 # Windows 非法文件名字符，见 SCHEMA 2.1
 _INVALID_FILENAME_CHARS = set('\\/:*?"<>|')
+
+# _unique_path 抢占位的最大尝试次数，防止病态情况下无限循环
+_MAX_UNIQUE_ATTEMPTS = 1000
 
 
 def sanitize_filename(title: str) -> str:
@@ -48,10 +52,19 @@ class VaultStore:
 
     def _atomic_write_text(self, target: Path, text: str) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".tmp")
-        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-        os.replace(tmp, target)
+        # tmp 名带 pid + uuid：并发写同一个 target 时各写各的 tmp，不互踩。
+        # 固定名 <target>.tmp 在 Windows 上会直接 PermissionError。
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def _atomic_write_bytes(self, target: Path, data: bytes) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -72,12 +85,29 @@ class VaultStore:
 
     @staticmethod
     def _unique_path(directory: Path, stem: str, suffix: str) -> Path:
-        candidate = directory / f"{stem}{suffix}"
-        n = 2
-        while candidate.exists():
-            candidate = directory / f"{stem} ({n}){suffix}"
-            n += 1
-        return candidate
+        """独占创建一个 0 字节占位文件并返回它的路径，重名按 " (2)"、" (3)" 递增。
+
+        不用 exists() 判断：check-then-act 在并发下所有调用方都会看到「文件不存在」、
+        全都选中同一个路径，再被 os.replace 静默互相覆盖。改成 open(..., "x")
+        把唯一性裁决交给内核。
+
+        调用方拿到占位后必须负责写入内容，中途失败要 unlink 掉占位文件。
+        """
+        directory.mkdir(parents=True, exist_ok=True)
+        n = 1
+        for _ in range(_MAX_UNIQUE_ATTEMPTS):
+            name = f"{stem}{suffix}" if n == 1 else f"{stem} ({n}){suffix}"
+            candidate = directory / name
+            try:
+                with open(candidate, "x", encoding="utf-8"):
+                    pass
+            except FileExistsError:
+                n += 1
+                continue
+            return candidate
+        raise RuntimeError(
+            f"{_MAX_UNIQUE_ATTEMPTS} 次内没能为 {stem}{suffix} 抢到唯一文件名: {directory}"
+        )
 
     # ---------- 笔记 ----------
 
@@ -117,7 +147,15 @@ class VaultStore:
         directory = self.inbox_dir if fm.status == "inbox" else self.notes_dir
         stem = sanitize_filename(fm.title)
         target = self._unique_path(directory, stem, ".md")
-        self._atomic_write_text(target, self._serialize_note(note))
+        try:
+            self._atomic_write_text(target, self._serialize_note(note))
+        except BaseException:
+            # 占位抢到了但内容没写成：不能在 notes/ 里留下 0 字节的 .md
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         rel = target.relative_to(self.root)
         note.path = rel
         return rel
@@ -145,5 +183,13 @@ class VaultStore:
         suffix = "." + ext.lstrip(".").lower()
         stem = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         target = self._unique_path(self.assets_dir, stem, suffix)
-        self._atomic_write_bytes(target, data)
+        try:
+            self._atomic_write_bytes(target, data)
+        except BaseException:
+            # 同 create_note：_unique_path 抢到的是占位文件，写失败要清掉
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return target.relative_to(self.root).as_posix()

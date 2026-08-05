@@ -62,9 +62,16 @@ class SearchIndex:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         try:
+            # WAL：读不阻塞写、写不阻塞读，多线程各开连接时不会互相卡死
+            conn.execute("PRAGMA journal_mode=WAL")
+            # 抢不到写锁时等 5 秒再报错，而不是立刻 SQLITE_BUSY
+            conn.execute("PRAGMA busy_timeout=5000")
             self._ensure_schema(conn)
             yield conn
             conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
