@@ -37,10 +37,12 @@ class _FakeRunnable:
     def __init__(self, outputs: list) -> None:
         self.outputs = list(outputs)
         self.calls = 0
+        self.messages: list = []
 
     def invoke(self, messages: object) -> object:
         idx = min(self.calls, len(self.outputs) - 1)
         self.calls += 1
+        self.messages.append(messages)
         out = self.outputs[idx]
         if isinstance(out, Exception):
             raise out
@@ -63,8 +65,15 @@ class _FakeModel:
 
 def _patch_classify(monkeypatch: pytest.MonkeyPatch, outputs: list) -> _FakeRunnable:
     runnable = _FakeRunnable(outputs)
-    monkeypatch.setattr(extractor, "get_classify_model", lambda override=None: _FakeModel(runnable))
+    model = _FakeModel(runnable)
+    runnable.model = model  # 让测试能看到绑定了哪个 schema
+    monkeypatch.setattr(extractor, "get_classify_model", lambda override=None: model)
     return runnable
+
+
+def _batch(*drafts: NoteDraft, **overrides) -> "extractor._DraftBatch":
+    """把草稿包成模型原样返回的形态;overrides 覆盖每条草稿的字段(可超出 NoteDraft 上限)。"""
+    return extractor._DraftBatch(drafts=[{**d.model_dump(), **overrides} for d in drafts])
 
 
 def _patch_extract(monkeypatch: pytest.MonkeyPatch, outputs: list) -> _FakeRunnable:
@@ -213,7 +222,7 @@ def test_notedraft_length_constraints() -> None:
 
 
 def test_extract_drafts_returns_batch(monkeypatch: pytest.MonkeyPatch) -> None:
-    batch = extractor._DraftBatch(drafts=[_draft(), _draft(title="泡利矩阵")])
+    batch = _batch(_draft(), _draft(title="泡利矩阵"))
     _patch_extract(monkeypatch, [_ok(batch)])
 
     drafts, _usage = extractor.extract_drafts(image=None, text="一段关于角动量的短文本")
@@ -222,12 +231,150 @@ def test_extract_drafts_returns_batch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_extract_drafts_usage_accumulates(monkeypatch: pytest.MonkeyPatch) -> None:
-    batch = extractor._DraftBatch(drafts=[_draft()])
+    batch = _batch(_draft())
     _patch_extract(monkeypatch, [_ok(batch)])
 
     _drafts, usage = extractor.extract_drafts(None, "文本")
 
     assert usage == {"input_tokens": 10, "output_tokens": 5, "model": "fake-model"}
+
+
+# ---------- 真实接口上实测过的失败:超长字段不得让整次提取失败 ----------
+
+
+def test_overlong_fields_are_compressed_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    long_summary = "概" * 70
+    long_point = "点" * 55
+    _patch_extract(
+        monkeypatch, [_ok(_batch(_draft(), summary=long_summary, points=[long_point, "短要点"]))]
+    )
+    compressor = _patch_classify(
+        monkeypatch, [_ok(extractor._Compressed(items=["压缩后的概要", "压缩后的要点"]))]
+    )
+
+    drafts, _usage = extractor.extract_drafts(None, "文本")
+
+    assert drafts[0].summary == "压缩后的概要"
+    assert drafts[0].points == ["压缩后的要点", "短要点"]
+    # 一次调用压完所有超长文本,且把各自的上限告诉了模型
+    assert compressor.calls == 1
+    body = compressor.messages[0][0].content
+    assert f"1. (上限 50 字) {long_summary}" in body
+    assert f"2. (上限 40 字) {long_point}" in body
+
+
+@pytest.mark.parametrize(
+    "compress_output",
+    [
+        _fail(),  # 压缩调用本身失败
+        _ok(extractor._Compressed(items=["只回了一条"])),  # 条数对不上
+        _ok(extractor._Compressed(items=["仍" * 80, "仍" * 80])),  # 压完还是超长
+    ],
+)
+def test_compress_failure_falls_back_to_truncation(
+    monkeypatch: pytest.MonkeyPatch, compress_output: dict
+) -> None:
+    _patch_extract(
+        monkeypatch, [_ok(_batch(_draft(), summary="概" * 70, points=["点" * 55]))]
+    )
+    _patch_classify(monkeypatch, [compress_output])
+
+    drafts, _usage = extractor.extract_drafts(None, "文本")
+
+    assert drafts[0].summary == "概" * 49 + "…"
+    assert drafts[0].points == ["点" * 39 + "…"]
+
+
+def test_no_compress_call_when_everything_fits(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_extract(monkeypatch, [_ok(_batch(_draft()))])
+    compressor = _patch_classify(monkeypatch, [_fail()])
+
+    extractor.extract_drafts(None, "文本")
+
+    assert compressor.calls == 0
+
+
+def test_excess_counts_are_trimmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    wire = _batch(
+        *[_draft(title=f"草稿{i}") for i in range(7)],
+        points=[f"要点{i}" for i in range(9)] + ["  "],
+        aliases=["RAG", " RAG ", "", "a", "b", "c", "d", "e"],
+        related=[f"概念{i}" for i in range(8)],
+    )
+    _patch_extract(monkeypatch, [_ok(wire)])
+
+    drafts, _usage = extractor.extract_drafts(None, "文本")
+
+    assert [d.title for d in drafts] == [f"草稿{i}" for i in range(5)]
+    assert drafts[0].points == [f"要点{i}" for i in range(6)]
+    assert drafts[0].aliases == ["RAG", "a", "b", "c", "d"]  # 去空、去重、最多 5 个
+    assert len(drafts[0].related) == 5
+
+
+def test_empty_points_fall_back_to_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_extract(monkeypatch, [_ok(_batch(_draft(), points=[]))])
+
+    drafts, _usage = extractor.extract_drafts(None, "文本")
+
+    assert drafts[0].points == [drafts[0].summary]
+
+
+def test_blank_title_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_extract(monkeypatch, [_ok(_batch(_draft(), title="  "))])
+
+    with pytest.raises(extractor.ExtractError, match="空的标题或概要"):
+        extractor.extract_drafts(None, "文本")
+
+
+# ---------- 重试必须告诉模型错在哪 ----------
+
+
+def test_parse_failure_retry_carries_the_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    runnable = _patch_extract(monkeypatch, [_fail(), _ok(_batch(_draft()))])
+
+    drafts, _usage = extractor.extract_drafts(None, "文本")
+
+    assert len(drafts) == 1
+    first, second = runnable.messages
+    assert len(second) == len(first) + 1
+    assert "坏 json" in second[-1].content
+    assert "没有通过校验" in second[-1].content
+
+
+def test_extract_error_message_is_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ExtractError 的消息会直接显示在界面上,不能带模型返回的全文。"""
+    _patch_extract(monkeypatch, [_fail()])
+
+    with pytest.raises(extractor.ExtractError) as info:
+        extractor.extract_drafts(None, "文本")
+
+    assert str(info.value) == "模型输出不合法,已重试一次仍失败: 坏 json"
+
+
+def test_semantic_retry_tells_the_model_what_was_wrong(monkeypatch: pytest.MonkeyPatch) -> None:
+    bad = ClassifyResult(category="physics/nope", confidence=0.9)
+    good = ClassifyResult(category="physics/quantum-mechanics", confidence=0.9)
+    runnable = _patch_classify(monkeypatch, [_ok(bad), _ok(good)])
+
+    result, _usage = extractor.classify(
+        _draft(), leaves=["physics/quantum-mechanics"], tags=[], known_domains=[]
+    )
+
+    assert result.category == "physics/quantum-mechanics"
+    assert "physics/nope" in runnable.messages[1][-1].content
+    assert runnable.model.schema is ClassifyResult
+
+
+def test_empty_leaves_uses_schema_with_required_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """分类表为空时 suggested_domain 在 schema 里必填,模型没法像可选字段那样直接省略。"""
+    parsed = extractor._DomainResult(suggested_domain="人工智能", reason="x")
+    runnable = _patch_classify(monkeypatch, [_ok(parsed)])
+
+    result, _usage = extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
+
+    assert runnable.model.schema is extractor._DomainResult
+    assert "suggested_domain" in extractor._DomainResult.model_json_schema()["required"]
+    assert (result.category, result.suggested_domain, result.confidence) == (None, "人工智能", 0.0)
 
 
 def test_extract_drafts_requires_some_input() -> None:

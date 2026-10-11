@@ -4,7 +4,8 @@
 两段的失败模式和重试语义也不同,合在一起会互相污染。
 
 重试策略:
-- 结构化输出解析失败 → 重试一次,仍失败抛 ExtractError(对两个函数都适用)。
+- 结构化输出解析失败 → 带着错误原因重试一次,仍失败抛 ExtractError(对两个函数都适用)。
+- extract 的字数/条数超限**不算失败**:解析时不校验,事后由 _fit_drafts 压缩或截断。
 - classify 额外的语义重试:模型给的 category 不在叶子表里、或 category 为 null 时
   suggested_domain 不是合法领域名(缺失 / 字符串 "null" / 长度不在 2-8 字)→ 再问一次。
   非法 category 最终规整成 null;但 suggested_domain 重试后仍缺失则**抛 ExtractError**,
@@ -22,8 +23,18 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.extract.client import bind_structured, get_classify_model, get_extract_model
-from app.extract.models import ClassifyResult, NoteDraft
-from pydantic import BaseModel, ConfigDict, Field
+from app.extract.models import (
+    ALIASES_MAX,
+    DRAFTS_MAX,
+    POINT_MAX,
+    POINTS_MAX,
+    RELATED_MAX,
+    SUMMARY_MAX,
+    TITLE_MAX,
+    ClassifyResult,
+    NoteDraft,
+)
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +50,36 @@ class ExtractError(RuntimeError):
     """提取/分类过程无法产出合法结构化结果(含重试后仍失败)。"""
 
 
+class _WireDraft(BaseModel):
+    """模型原样返回的草稿。字数上限只写进字段描述,**不做校验**。
+
+    真实接口上实测:模型经常把概要写到六七十字。若在这里硬校验,一个字段超长就会让
+    整次录入失败(连同已经花掉的几十秒)。超长由 _fit_drafts 事后压缩,不在解析时拦。
+    """
+
+    title: str = Field(description=f"不超过 {TITLE_MAX} 字")
+    summary: str = Field(description=f"一句话,不超过 {SUMMARY_MAX} 字")
+    points: list[str] = Field(description=f"1 到 {POINTS_MAX} 条,每条不超过 {POINT_MAX} 字")
+    aliases: list[str] = Field(default_factory=list, description=f"最多 {ALIASES_MAX} 个")
+    related: list[str] = Field(default_factory=list, description=f"最多 {RELATED_MAX} 个")
+
+
 class _DraftBatch(BaseModel):
     """extract 的结构化输出容器:一次 1-5 条草稿。"""
 
-    model_config = ConfigDict(extra="forbid")
+    drafts: list[_WireDraft] = Field(min_length=1, description=f"1 到 {DRAFTS_MAX} 条")
 
-    drafts: list[NoteDraft] = Field(min_length=1, max_length=5)
+
+class _Compressed(BaseModel):
+    items: list[str]
+
+
+class _DomainResult(BaseModel):
+    """分类表为空时 classify 的结构化输出:只要领域名,且必填。"""
+
+    suggested_domain: str
+    tags: list[str] = Field(default_factory=list)
+    reason: str = ""
 
 
 # ---------- 公开函数 ----------
@@ -63,9 +98,86 @@ def extract_drafts(
     runnable = bind_structured(model, _DraftBatch)
     messages = _extract_messages(image, text)
     batch, usage = _invoke_structured(runnable, messages, _model_id(model))
-    for draft in batch.drafts:
+    drafts = _fit_drafts(batch.drafts)
+    for draft in drafts:
         _warn_draft_quality(draft)
-    return batch.drafts, usage
+    return drafts, usage
+
+
+def _fit_drafts(wires: list[_WireDraft]) -> list[NoteDraft]:
+    """把模型原样返回的草稿收进 NoteDraft 的上限里:超长文本先交给文本模型压缩,
+    压不下来再截断(以「…」结尾,原文仍在笔记的「原始输入」里)。只删减,不新增内容。"""
+    if len(wires) > DRAFTS_MAX:
+        logger.warning("模型返回 %d 条草稿,只保留前 %d 条", len(wires), DRAFTS_MAX)
+        wires = wires[:DRAFTS_MAX]
+
+    cleaned = []
+    for wire in wires:
+        title, summary = wire.title.strip(), wire.summary.strip()
+        if not title or not summary:
+            raise ExtractError(f"模型返回了空的标题或概要: {wire.model_dump()}")
+        points = [p.strip() for p in wire.points if p.strip()]
+        if len(points) > POINTS_MAX:
+            logger.warning("draft %r 有 %d 条要点,只保留前 %d 条", title, len(points), POINTS_MAX)
+        # 一条要点都没有时用概要顶上:NoteDraft 至少要一条
+        cleaned.append((title, summary, points[:POINTS_MAX] or [summary], wire))
+
+    # 收集所有超长文本,一次调用压缩完
+    too_long: list[tuple[str, int]] = []
+    for title, summary, points, _wire in cleaned:
+        for value, limit in [(title, TITLE_MAX), (summary, SUMMARY_MAX)] + [
+            (p, POINT_MAX) for p in points
+        ]:
+            if len(value) > limit and (value, limit) not in too_long:
+                too_long.append((value, limit))
+    shortened = dict(zip(too_long, _compress(too_long))) if too_long else {}
+
+    def fit(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        candidate = shortened.get((value, limit), "").strip()
+        if candidate and len(candidate) <= limit:
+            return candidate
+        logger.warning("文本压缩失败,截断到 %d 字: %r", limit, value)
+        return value[: limit - 1] + "…"
+
+    return [
+        NoteDraft(
+            title=fit(title, TITLE_MAX),
+            summary=fit(summary, SUMMARY_MAX),
+            points=[fit(p, POINT_MAX) for p in points],
+            aliases=_dedupe(wire.aliases)[:ALIASES_MAX],
+            related=_dedupe(wire.related)[:RELATED_MAX],
+        )
+        for title, summary, points, wire in cleaned
+    ]
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    kept: list[str] = []
+    for value in values:
+        value = value.strip()
+        if value and value not in kept:
+            kept.append(value)
+    return kept
+
+
+def _compress(items: list[tuple[str, int]]) -> list[str]:
+    """让文本模型把每条文本压到各自上限以内。任何失败都返回空串列表,由调用方截断兜底。"""
+    listing = "\n".join(f"{i}. (上限 {limit} 字) {text}" for i, (text, limit) in enumerate(items, 1))
+    body = _load_prompt("compress_zh.md").format(count=len(items), items=listing)
+    try:
+        model = get_classify_model()
+        parsed, _usage = _invoke_structured(
+            bind_structured(model, _Compressed), [HumanMessage(content=body)], _model_id(model)
+        )
+    except Exception as exc:
+        logger.warning("压缩超长文本的调用失败: %s", exc)
+        return [""] * len(items)
+    if len(parsed.items) != len(items):
+        logger.warning("压缩结果条数不符: 期望 %d,得到 %d", len(items), len(parsed.items))
+        return [""] * len(items)
+    return parsed.items
 
 
 def _warn_draft_quality(draft: NoteDraft) -> None:
@@ -90,15 +202,20 @@ def classify(
 ) -> tuple[ClassifyResult, dict]:
     """给单条草稿分类。leaves 为空是正常情况,直接走 suggested_domain 路径。"""
     model = get_classify_model(override)
-    runnable = bind_structured(model, ClassifyResult)
+    # 分类表为空时换成 suggested_domain 必填的 schema：用 ClassifyResult 时它是可选字段，
+    # 模型会直接省略它（真实接口上实测出现过），整次录入就失败了
+    runnable = bind_structured(model, ClassifyResult if leaves else _DomainResult)
     messages = _classify_messages(draft, leaves, tags, known_domains)
     model_id = _model_id(model)
 
-    raw, usage = _invoke_structured(runnable, messages, model_id)
-    raw = _normalize(raw)
-    if _needs_retry(raw, leaves):
-        raw2, again = _invoke_structured(runnable, messages, model_id)
-        raw = _normalize(raw2)
+    parsed, usage = _invoke_structured(runnable, messages, model_id)
+    raw = _normalize(_as_classify_result(parsed))
+    hint = _retry_hint(raw, leaves)
+    if hint is not None:
+        parsed, again = _invoke_structured(
+            runnable, [*messages, HumanMessage(content=hint)], model_id
+        )
+        raw = _normalize(_as_classify_result(parsed))
         usage = _add_usage(usage, again)
 
     # 降级到 suggested_domain 路径却拿不到合法领域名 → 抛,不静默放行
@@ -163,16 +280,34 @@ def _effective_category(raw: ClassifyResult, leaves: list[str]) -> str | None:
     return None
 
 
-def _needs_retry(raw: ClassifyResult, leaves: list[str]) -> bool:
-    """传入的 raw 已归一化(字符串 "null" → None)。"""
+def _retry_hint(raw: ClassifyResult, leaves: list[str]) -> str | None:
+    """需要语义重试时返回要追加给模型的纠正说明,否则 None。raw 已归一化。
+
+    重试必须带上「错在哪」:温度为 0,原样重发大概率得到同样的错误输出。
+    """
     eff = _effective_category(raw, leaves)
-    # 模型给了 category 但不在叶子表里 → 再问一次
     if raw.category is not None and eff is None:
-        return True
-    # 走 suggested_domain 路径,但领域名缺失 / 长度不合规 → 再问一次
+        return (
+            f"你上一次给的 category「{raw.category}」不在可用的分类叶子里。"
+            "只能原样选用列表中的某一个;都不合适就把 category 设为 null 并给出 suggested_domain。"
+        )
     if eff is None and not _valid_domain(raw.suggested_domain):
-        return True
-    return False
+        return (
+            f"你上一次给的 suggested_domain 是 {raw.suggested_domain!r},不合格。"
+            f"它必须是 {_DOMAIN_MIN} 到 {_DOMAIN_MAX} 个字的学科或技术领域名,请重新给出。"
+        )
+    return None
+
+
+def _as_classify_result(parsed: BaseModel) -> ClassifyResult:
+    if isinstance(parsed, ClassifyResult):
+        return parsed
+    return ClassifyResult(
+        category=None,
+        suggested_domain=parsed.suggested_domain,  # type: ignore[attr-defined]
+        tags=parsed.tags,  # type: ignore[attr-defined]
+        reason=parsed.reason,  # type: ignore[attr-defined]
+    )
 
 
 def _finalize(raw: ClassifyResult, leaves: list[str], tags: list[str]) -> ClassifyResult:
@@ -208,34 +343,51 @@ def _finalize(raw: ClassifyResult, leaves: list[str], tags: list[str]) -> Classi
 
 
 class _ParseFailure(RuntimeError):
-    pass
+    """reason 是给人和给模型看的简短原因;完整现场(模型返回全文)在异常消息里,只进日志。"""
+
+    def __init__(self, parsing_error: object, raw_text: str) -> None:
+        super().__init__(f"parsing_error={parsing_error!r}; 模型返回: {raw_text}")
+        text = str(parsing_error) if parsing_error is not None else "模型没有返回结构化结果"
+        self.reason = "\n".join(
+            line for line in text.splitlines() if "errors.pydantic.dev" not in line
+        )
+
+
+_RETRY_FEEDBACK = (
+    "你上一次的输出没有通过校验:\n{reason}\n\n"
+    "请修正这些问题后重新输出完整结果。字数和条数上限是硬性要求,超出就压缩表述,不要删掉知识点。"
+)
 
 
 def _invoke_structured(runnable, messages, model_id: str) -> tuple[BaseModel, dict]:
-    """调用一次,解析失败重试一次,仍失败抛 ExtractError。返回 (parsed, usage)。
+    """调用一次,失败重试一次,仍失败抛 ExtractError。返回 (parsed, usage)。
 
-    解析失败时把模型实际返回的全文带进异常,不只报「解析失败」——
-    失败现场看不见,排查就无从下手。
+    输出不合法时,重试会把校验错误原样告诉模型——温度为 0,不说错在哪只会得到同样的输出。
+    模型实际返回的全文记进日志(失败现场看不见就无从排查),但不塞进 ExtractError:
+    那条消息会直接显示给用户。
     """
     last: Exception | None = None
+    attempt = messages
     for _ in range(2):
         try:
-            out = runnable.invoke(messages)
+            out = runnable.invoke(attempt)
             parsed, raw = _split_output(out)
             return parsed, _usage_from_raw(raw, model_id)
-        except Exception as exc:  # 解析失败、校验失败、调用异常都重试一次
+        except _ParseFailure as exc:
             last = exc
-    raise ExtractError(f"结构化输出解析失败,已重试一次仍失败。最后一次: {last}") from last
+            logger.warning("模型输出不合法: %s", exc)
+            attempt = [*messages, HumanMessage(content=_RETRY_FEEDBACK.format(reason=exc.reason))]
+        except Exception as exc:  # 网络、鉴权等调用异常:原样再试一次
+            last = exc
+    reason = last.reason if isinstance(last, _ParseFailure) else str(last)
+    raise ExtractError(f"模型输出不合法,已重试一次仍失败: {reason}") from last
 
 
 def _split_output(out: object) -> tuple[BaseModel, object]:
     """拆开 include_raw=True 的返回:{raw, parsed, parsing_error}。"""
     if isinstance(out, dict):
         if out.get("parsing_error") is not None or out.get("parsed") is None:
-            raise _ParseFailure(
-                f"parsing_error={out.get('parsing_error')!r}; "
-                f"模型返回: {_raw_text(out.get('raw'))}"
-            )
+            raise _ParseFailure(out.get("parsing_error"), _raw_text(out.get("raw")))
         return out["parsed"], out.get("raw")
     # 兜底:非 include_raw 直接是 parsed 对象
     return out, None  # type: ignore[return-value]
