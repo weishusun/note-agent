@@ -144,6 +144,14 @@ async function errorMessage(resp: Response): Promise<string> {
   return `请求失败（${resp.status}）`
 }
 
+// 编辑一条笔记时可以改的字段；只发要改的
+export interface NoteEdit {
+  title?: string
+  summary?: string
+  aliases?: string[]
+  body?: string
+}
+
 function send<T>(method: "POST" | "PUT", url: string, body: unknown): Promise<T> {
   return request<T>(url, {
     method,
@@ -176,6 +184,15 @@ export const api = {
   note: (path: string) =>
     request<NoteDetail>(`/api/notes/${path.split("/").map(encodeURIComponent).join("/")}`),
   reindex: () => post<{ indexed: number }>("/api/reindex", {}),
+
+  // 手写新建、编辑、删除。category 不给则由模型自动归类
+  createNote: (note: Required<NoteEdit> & { category?: string }) =>
+    post<NoteRef>("/api/notes", note),
+  editNote: (id: string, changes: NoteEdit) =>
+    send<NoteRef>("PUT", `/api/notes/${encodeURIComponent(id)}`, changes),
+  deleteNote: (id: string) =>
+    request<{ deleted: boolean }>(`/api/notes/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  ref: (id: string) => request<NoteRef>(`/api/refs/${encodeURIComponent(id)}`),
 
   // 分类：路径里有中文和「/」，一律放在请求体或查询参数里
   tree: () => request<Tree>("/api/tree"),

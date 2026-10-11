@@ -7,6 +7,7 @@
 """
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -203,6 +204,52 @@ class VaultStore:
             note.body = body
         self._atomic_write_text(self._resolve(rel_path), self._serialize_note(note))
         return note
+
+    def rename_note(self, rel_path: str | Path, new_stem: str) -> Path:
+        """把笔记文件改名（留在原目录里），返回新的相对路径。新名字已被占用时抛 FileExistsError。
+
+        只动文件名。其他笔记里指向它的链接由调用方随后用 replace_links 改写（SCHEMA 2.6）。
+        """
+        source = self._resolve(rel_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"笔记不存在: {rel_path}")
+        name = f"{new_stem}.md"
+        if any((d / name).exists() for d in (self.notes_dir, self.inbox_dir)):
+            raise FileExistsError(f"文件名已被占用: {name}")
+        target = source.with_name(name)
+        os.replace(source, target)
+        return target.relative_to(self.root.resolve())
+
+    def delete_note(self, rel_path: str | Path) -> None:
+        target = self._resolve(rel_path)
+        if not target.is_file():
+            raise FileNotFoundError(f"笔记不存在: {rel_path}")
+        target.unlink()
+
+    def replace_links(self, old_stem: str, new_stem: str | None) -> list[Note]:
+        """改写全库正文里指向 old_stem 的 [[双链]]，返回被改写的笔记（调用方据此更新索引）。
+
+        new_stem 给了就改成指向它（[[旧|显示名]] 的显示名保留）；为 None 表示目标已被删除，
+        链接退化成纯文字：[[旧]] → 旧，[[旧|显示名]] → 显示名。读不了的笔记文件跳过。
+        """
+        pattern = re.compile(r"\[\[" + re.escape(old_stem) + r"(?:\|([^\]]*))?\]\]")
+
+        def substitute(match: re.Match[str]) -> str:
+            label = match.group(1)
+            if new_stem is None:
+                return label if label is not None else old_stem
+            return f"[[{new_stem}|{label}]]" if label is not None else f"[[{new_stem}]]"
+
+        rewritten: list[Note] = []
+        for rel in self.list_notes(include_inbox=True):
+            try:
+                note = self.read_note(rel)
+            except (ValueError, OSError, yaml.YAMLError):
+                continue
+            body = pattern.sub(substitute, note.body)
+            if body != note.body:
+                rewritten.append(self.rewrite_note(rel, body=body))
+        return rewritten
 
     # ---------- MOC ----------
 

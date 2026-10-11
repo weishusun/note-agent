@@ -10,7 +10,9 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from app.ingest.jobs import JobRegistry, Progress
+from app.organize.editor import NoteEditor
 from app.organize.service import CategoryNotEmpty, NoteNotFound, Organizer, ReclassifyRunning
+from app.search.query import find_by_id
 from app.vault.models import NoteRef, Tree
 from app.vault.taxonomy import CategoryExists, CategoryNotFound
 
@@ -19,6 +21,24 @@ logger = logging.getLogger(__name__)
 
 class NoteCategoryBody(BaseModel):
     category: str
+
+
+class NoteCreateBody(BaseModel):
+    # 约束在 NoteEditor 里校验并返回 400；这里不加，免得 FastAPI 先一步回 422
+    title: str
+    summary: str
+    body: str
+    aliases: list[str] = []
+    category: str | None = None
+
+
+class NoteEditBody(BaseModel):
+    """只带要改的字段。"""
+
+    title: str | None = None
+    summary: str | None = None
+    aliases: list[str] | None = None
+    body: str | None = None
 
 
 class CategoryCreateBody(BaseModel):
@@ -36,6 +56,44 @@ class ReclassifyBody(BaseModel):
 
 def build_router(organizer: Organizer, jobs: JobRegistry) -> APIRouter:
     router = APIRouter()
+    editor = NoteEditor(organizer)
+
+    @router.get("/api/refs/{note_id}")
+    def api_ref(note_id: str) -> NoteRef:
+        ref = find_by_id(organizer.index, note_id)
+        if ref is None:
+            raise HTTPException(status_code=404, detail="笔记不存在")
+        return ref
+
+    @router.post("/api/notes", status_code=201)
+    def api_create_note(body: NoteCreateBody) -> NoteRef:
+        try:
+            return editor.create(
+                title=body.title,
+                summary=body.summary,
+                body=body.body,
+                aliases=body.aliases,
+                category=body.category,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.put("/api/notes/{note_id}")
+    def api_edit_note(note_id: str, body: NoteEditBody) -> NoteRef:
+        try:
+            return editor.edit(note_id, **body.model_dump(exclude_unset=True))
+        except NoteNotFound:
+            raise HTTPException(status_code=404, detail="笔记不存在")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.delete("/api/notes/{note_id}")
+    def api_delete_note(note_id: str) -> dict[str, bool]:
+        try:
+            editor.delete(note_id)
+        except NoteNotFound:
+            raise HTTPException(status_code=404, detail="笔记不存在")
+        return {"deleted": True}
 
     @router.get("/api/tree")
     def api_tree() -> Tree:

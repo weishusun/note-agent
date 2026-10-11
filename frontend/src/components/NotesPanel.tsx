@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  FilePlusIcon,
   LockIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -9,6 +10,7 @@ import {
 } from "lucide-react"
 
 import { Alert } from "@/components/Alert"
+import { NewNoteDialog } from "@/components/NewNoteDialog"
 import { NoteCard } from "@/components/NoteCard"
 import { Button } from "@/components/ui/button"
 import { api, categoryLabel, type NoteRef, type Tree } from "@/lib/api"
@@ -45,6 +47,7 @@ export function NotesPanel({
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [confirmingAll, setConfirmingAll] = useState(false)
+  const [creating, setCreating] = useState(false)
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), [])
 
@@ -280,6 +283,16 @@ export function NotesPanel({
             variant="outline"
             size="lg"
             disabled={disabled}
+            onClick={() => setCreating(true)}
+            title="自己写一条笔记"
+          >
+            <FilePlusIcon />
+            新建笔记
+          </Button>
+          <Button
+            variant="outline"
+            size="lg"
+            disabled={disabled}
             onClick={() => setConfirmingAll(true)}
             title="让模型把所有未锁定的笔记重新分一遍类"
           >
@@ -420,6 +433,19 @@ export function NotesPanel({
           <NoteCard key={note.path} note={note} onOpen={onOpenNote} />
         ))}
       </div>
+
+      {creating && (
+        <NewNoteDialog
+          tree={tree}
+          initialCategory={selectedPath?.includes("/") ? selectedPath : null}
+          onClose={() => setCreating(false)}
+          onCreated={(note) => {
+            setCreating(false)
+            reload()
+            onOpenNote(note)
+          }}
+        />
+      )}
     </section>
   )
 }

@@ -265,6 +265,15 @@ def refs_with_category(index: SearchIndex, category: str) -> list[NoteRef]:
         return [_to_ref(row) for row in _dict_rows(cursor)]
 
 
+def refs_with_duplicate_of(index: SearchIndex, note_id: str) -> list[NoteRef]:
+    """标记为「疑似与 note_id 重复」的全部笔记。那条笔记被删或被合并时要把这些标记清掉。"""
+    with index.connect() as conn:
+        cursor = conn.execute(
+            f"SELECT {_ROW_COLUMNS} FROM notes WHERE duplicate_of = ? ORDER BY path", (note_id,)
+        )
+        return [_to_ref(row) for row in _dict_rows(cursor)]
+
+
 def category_counts(index: SearchIndex) -> dict[str, int]:
     """每个「大块/小块」下 status=active 的笔记数。待整理的不计入任何分类（SCHEMA /api/tree）。"""
     with index.connect() as conn:
