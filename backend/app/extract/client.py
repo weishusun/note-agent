@@ -22,7 +22,19 @@ def _resolve_model(override: str | None, configured: str | None, env_key: str) -
     return name
 
 
-def _build(model_name: str):
+# 单次请求的超时(秒)。SDK 默认 10 分钟且自动重试 2 次,真实接口上实测出现过请求挂住不返回、
+# 一次提问卡五分钟以上的情况。看图提取最慢(实测 40 秒左右),留足余量
+_TIMEOUT_SECONDS = 120.0
+# 检索词扩展只是锦上添花,慢了就放弃,不能拖住整次问答
+_EXPAND_TIMEOUT_SECONDS = 10.0
+
+
+def _build(
+    model_name: str,
+    timeout: float = _TIMEOUT_SECONDS,
+    max_retries: int = 1,
+    extra_body: dict | None = None,
+):
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
@@ -30,6 +42,9 @@ def _build(model_name: str):
         api_key=config.require_api_key(),
         base_url=config.GLM_BASE_URL,
         temperature=_TEMPERATURE,
+        timeout=timeout,
+        max_retries=max_retries,
+        extra_body=extra_body,
     )
 
 
@@ -41,6 +56,19 @@ def get_extract_model(override: str | None = None):
 def get_classify_model(override: str | None = None):
     """文本/分类模型(CLASSIFY_MODEL)。"""
     return _build(_resolve_model(override, config.CLASSIFY_MODEL, "CLASSIFY_MODEL"))
+
+
+def get_expand_model(override: str | None = None):
+    """检索词扩展用的文本模型(CLASSIFY_MODEL),超时短、不重试、默认关闭思考。
+
+    实测 glm-4.5-air 默认开着思考模式,给几个检索词要 5 到 11 秒;关掉后 0.8 秒。
+    关闭思考后它的 function calling 输出是坏的,所以调用方必须用 json_mode。
+    """
+    name = _resolve_model(override, config.CLASSIFY_MODEL, "CLASSIFY_MODEL")
+    extra_body = {"thinking": {"type": "disabled"}} if config.EXPAND_DISABLE_THINKING else None
+    return _build(
+        name, timeout=_EXPAND_TIMEOUT_SECONDS, max_retries=0, extra_body=extra_body
+    )
 
 
 def get_answer_model(override: str | None = None):

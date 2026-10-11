@@ -5,9 +5,10 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from app.ask.expand import expand_question
 from app.extract.client import get_answer_model
 from app.search.index import SearchIndex
-from app.search.query import retrieve_for_question
+from app.search.query import note_vocabulary, retrieve_for_question
 from app.vault.models import NoteRef
 from app.vault.store import VaultStore
 
@@ -20,14 +21,17 @@ class AskResult(BaseModel):
     sources: list[NoteRef]
     # False 表示没检索到任何笔记，回答完全来自模型自身知识
     grounded: bool
+    # 模型为这个问题扩展出的检索词；扩展失败时为空
+    keywords: list[str]
 
 
 def answer_question(
     store: VaultStore, index: SearchIndex, question: str, limit: int = 5
 ) -> AskResult:
+    keywords = expand_question(question, note_vocabulary(index))
     sources: list[NoteRef] = []
     blocks: list[str] = []
-    for ref in retrieve_for_question(index, question, limit):
+    for ref in retrieve_for_question(index, question, limit, keywords=keywords):
         try:
             note = store.read_note(ref.path)
         except (FileNotFoundError, ValueError):
@@ -42,7 +46,9 @@ def answer_question(
         HumanMessage(content=f"# 知识库笔记\n\n{notes_text}\n\n# 问题\n\n{question.strip()}"),
     ]
     reply = get_answer_model().invoke(messages)
-    return AskResult(answer=_text(reply.content), sources=sources, grounded=bool(sources))
+    return AskResult(
+        answer=_text(reply.content), sources=sources, grounded=bool(sources), keywords=keywords
+    )
 
 
 def _text(content: object) -> str:

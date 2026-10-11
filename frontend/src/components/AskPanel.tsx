@@ -108,6 +108,9 @@ function Answer({
           )
         })}
       </p>
+      {result.keywords.length > 0 && (
+        <p className="text-xs text-muted-foreground">检索词：{result.keywords.join(" · ")}</p>
+      )}
       {result.sources.length > 0 && (
         <div className="flex flex-col gap-2">
           <p className="text-xs text-muted-foreground">检索到的笔记</p>

@@ -29,6 +29,7 @@ export interface AskResult {
   answer: string
   sources: NoteRef[]
   grounded: boolean
+  keywords: string[]
 }
 
 export interface NoteDetail {

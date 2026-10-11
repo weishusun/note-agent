@@ -34,6 +34,9 @@ STRUCTURED_OUTPUT_METHOD: str = os.environ.get("STRUCTURED_OUTPUT_METHOD", "func
 # 分类置信度低于此值的笔记强制落 inbox（SCHEMA 不变量 10）。待 eval 校准
 INBOX_CONFIDENCE_THRESHOLD: float = 0.6
 
+# 检索词扩展时是否发送智谱专有参数 thinking=disabled。换成不认这个参数的服务商时设为 false
+EXPAND_DISABLE_THINKING: bool = os.environ.get("EXPAND_DISABLE_THINKING", "true").lower() != "false"
+
 
 def require_api_key() -> str:
     """在真正建模型前调用。缺 key 立刻抛可读错误,不拖到调用时才 401。"""

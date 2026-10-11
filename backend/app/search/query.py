@@ -9,6 +9,7 @@ NoteRef 完全从索引构造，不回读笔记文件（SCHEMA 第 4 节）。
 import json
 import re
 import sqlite3
+from collections.abc import Sequence
 
 from app.search.index import SearchIndex
 from app.vault.models import NoteRef
@@ -73,16 +74,21 @@ def list_inbox(index: SearchIndex) -> list[NoteRef]:
         return [_to_ref(row) for row in _dict_rows(cursor)]
 
 
-def retrieve_for_question(index: SearchIndex, question: str, limit: int = 5) -> list[NoteRef]:
+def retrieve_for_question(
+    index: SearchIndex, question: str, limit: int = 5, keywords: Sequence[str] = ()
+) -> list[NoteRef]:
     """给问答用的召回：输入是一句自然语言问题，不是关键词。
 
-    search() 把 q 当整句短语去匹配，问句几乎必然零命中，所以这里换一套：
-    ① 问题里**包含**某条笔记的标题/别名（反向包含）② 把问题切成三字片段做 FTS OR 查询。
+    search() 把 q 当整句短语去匹配，问句几乎必然零命中，所以这里换一套，按优先级：
+    ① 问题里**包含**某条笔记的标题 ② 问题里包含它的别名，或某个 keyword 正好就是它的标题
+    ③ keywords（模型为问题扩展出的检索词）与标题/别名互相包含，命中的词越多越靠前
+    ④ 把问题切成三字片段、连同 keywords 做 FTS OR 查询。
     inbox 笔记照常参与（冷启动时所有笔记都在 inbox），只排除 archived。
     """
     question = (question or "").strip()
     if not question:
         return []
+    keywords = [k.strip() for k in keywords if len(k.strip()) >= 2]
     hits: dict[str, tuple[int, float]] = {}
     with index.connect() as conn:
         for (path,) in conn.execute(
@@ -90,15 +96,34 @@ def retrieve_for_question(index: SearchIndex, question: str, limit: int = 5) -> 
             " WHERE length(title) >= 2 AND instr(lower(?), lower(title)) > 0",
             (question,),
         ):
-            _better(hits, path, _RANK_TITLE_EXACT, 0.0)
+            _better(hits, path, _Q_RANK_TITLE, 0.0)
         for (path,) in conn.execute(
             "SELECT DISTINCT notes.path FROM notes, json_each(notes.aliases)"
             " WHERE length(json_each.value) >= 2"
             " AND instr(lower(?), lower(json_each.value)) > 0",
             (question,),
         ):
-            _better(hits, path, _RANK_ALIAS_EXACT, 0.0)
+            _better(hits, path, _Q_RANK_ALIAS, 0.0)
+
+        matched: dict[str, int] = {}
+        for keyword in keywords:
+            # 检索词就是某条笔记的标题：那是模型对着库里的标题列表挑出来的，和别名命中同等可信
+            for (path,) in conn.execute(
+                "SELECT path FROM notes WHERE title = ? COLLATE NOCASE", (keyword,)
+            ):
+                _better(hits, path, _Q_RANK_ALIAS, 0.0)
+            paths = {
+                path
+                for sql in (_KEYWORD_TITLE_SQL, _KEYWORD_ALIAS_SQL)
+                for (path,) in conn.execute(sql, (keyword, keyword))
+            }
+            for path in paths:
+                matched[path] = matched.get(path, 0) + 1
+        for path, count in matched.items():
+            _better(hits, path, _Q_RANK_KEYWORD, -float(count))
+
         terms = _question_terms(question)
+        terms += [k.replace('"', "") for k in keywords if len(k) >= 3 and k not in terms]
         if terms:
             match = " OR ".join(f'"{t}"' for t in terms)
             for path, score in conn.execute(
@@ -106,7 +131,7 @@ def retrieve_for_question(index: SearchIndex, question: str, limit: int = 5) -> 
                 " ORDER BY bm25(notes_fts) LIMIT ?",
                 (match, _QUESTION_FTS_CANDIDATES),
             ):
-                _better(hits, path, _RANK_FTS, score)
+                _better(hits, path, _Q_RANK_FTS, score)
         rows = _fetch_rows(conn, list(hits))
 
     scored = [
@@ -117,6 +142,38 @@ def retrieve_for_question(index: SearchIndex, question: str, limit: int = 5) -> 
     scored.sort(key=lambda item: item[0])
     return [ref for _key, ref in scored[:limit]]
 
+
+def note_vocabulary(index: SearchIndex, limit: int = 200) -> list[str]:
+    """知识库的「词表」：最近更新的若干条笔记的标题，别名附在括号里。
+
+    给检索词扩展当参照——模型不知道库里用的是哪些词，就只能凭空猜同义词。
+    """
+    with index.connect() as conn:
+        rows = conn.execute(
+            "SELECT title, aliases FROM notes WHERE status != 'archived'"
+            " ORDER BY updated DESC, path LIMIT ?",
+            (limit,),
+        ).fetchall()
+    entries: list[str] = []
+    for title, aliases_json in rows:
+        aliases = [a for a in json.loads(aliases_json) if a != title]
+        entries.append(f"{title}（{'、'.join(aliases)}）" if aliases else title)
+    return entries
+
+
+_Q_RANK_TITLE, _Q_RANK_ALIAS, _Q_RANK_KEYWORD, _Q_RANK_FTS = range(4)
+
+# 检索词与标题/别名**互相包含**即命中：「微调」命中「模型微调」，「监督微调」也命中「微调」
+_KEYWORD_TITLE_SQL = (
+    "SELECT path FROM notes WHERE length(title) >= 2"
+    " AND (instr(lower(title), lower(?)) > 0 OR instr(lower(?), lower(title)) > 0)"
+)
+_KEYWORD_ALIAS_SQL = (
+    "SELECT DISTINCT notes.path FROM notes, json_each(notes.aliases)"
+    " WHERE length(json_each.value) >= 2"
+    " AND (instr(lower(json_each.value), lower(?)) > 0"
+    "      OR instr(lower(?), lower(json_each.value)) > 0)"
+)
 
 _QUESTION_FTS_CANDIDATES = 50
 _QUESTION_MAX_TERMS = 60
