@@ -22,7 +22,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.extract.client import bind_structured, get_classify_model, get_extract_model
+from app.extract.client import bind_json, bind_structured, get_classify_model, get_extract_model
 from app.extract.models import (
     ALIASES_MAX,
     DRAFTS_MAX,
@@ -169,7 +169,7 @@ def _compress(items: list[tuple[str, int]]) -> list[str]:
     try:
         model = get_classify_model()
         parsed, _usage = _invoke_structured(
-            bind_structured(model, _Compressed), [HumanMessage(content=body)], _model_id(model)
+            bind_json(model, _Compressed), [HumanMessage(content=body)], _model_id(model)
         )
     except Exception as exc:
         logger.warning("压缩超长文本的调用失败: %s", exc)
@@ -204,7 +204,7 @@ def classify(
     model = get_classify_model(override)
     # 分类表为空时换成 suggested_domain 必填的 schema：用 ClassifyResult 时它是可选字段，
     # 模型会直接省略它（真实接口上实测出现过），整次录入就失败了
-    runnable = bind_structured(model, ClassifyResult if leaves else _DomainResult)
+    runnable = bind_json(model, ClassifyResult if leaves else _DomainResult)
     messages = _classify_messages(draft, leaves, tags, known_domains)
     model_id = _model_id(model)
 

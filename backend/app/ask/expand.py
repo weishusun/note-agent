@@ -7,7 +7,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from app.extract.client import get_expand_model
+from app.extract.client import bind_json, get_expand_model
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +32,7 @@ def expand_question(question: str, vocabulary: Sequence[str] = ()) -> list[str]:
         vocabulary="\n".join(f"- {entry}" for entry in vocabulary) or _EMPTY_VOCABULARY,
     )
     try:
-        # 固定 json_mode，不跟随 STRUCTURED_OUTPUT_METHOD：关闭思考后 function calling 不可用
-        runnable = get_expand_model().with_structured_output(
-            _Keywords, method="json_mode", include_raw=True
-        )
-        out = runnable.invoke([HumanMessage(content=prompt)])
+        out = bind_json(get_expand_model(), _Keywords).invoke([HumanMessage(content=prompt)])
         parsed = out["parsed"] if isinstance(out, dict) else out
         raw = parsed.keywords
     except Exception as exc:

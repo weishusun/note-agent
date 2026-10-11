@@ -43,3 +43,9 @@
 4. reason:一句话说明你为什么这么判断。
 
 只描述这条知识点本身,不要参考它顺带提到的其它概念来决定它的归属。
+
+## 输出格式
+
+只输出一个 JSON 对象,不要输出别的内容,形如:
+{{"category": "parent/child 或 null", "suggested_domain": "领域名 或 null", "tags": [], "confidence": 0.8, "reason": "一句话理由"}}
+其中 category 与 suggested_domain 的 null 是 JSON null,不是字符串。

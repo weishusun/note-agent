@@ -34,8 +34,10 @@ STRUCTURED_OUTPUT_METHOD: str = os.environ.get("STRUCTURED_OUTPUT_METHOD", "func
 # 分类置信度低于此值的笔记强制落 inbox（SCHEMA 不变量 10）。待 eval 校准
 INBOX_CONFIDENCE_THRESHOLD: float = 0.6
 
-# 检索词扩展时是否发送智谱专有参数 thinking=disabled。换成不认这个参数的服务商时设为 false
-EXPAND_DISABLE_THINKING: bool = os.environ.get("EXPAND_DISABLE_THINKING", "true").lower() != "false"
+# 文本模型的辅助调用(分类、压缩、检索词扩展)是否发送智谱专有参数 thinking=disabled。
+# 实测 glm-4.5-air 默认开着思考,这类小调用每次 5 秒以上,关掉后不到 1 秒。
+# 换成不认这个参数的服务商时设为 false
+DISABLE_THINKING: bool = os.environ.get("DISABLE_THINKING", "true").lower() != "false"
 
 
 def require_api_key() -> str:

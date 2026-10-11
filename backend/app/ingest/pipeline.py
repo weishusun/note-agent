@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import subprocess
+import time
 from collections.abc import Callable
 
 from app.extract.extractor import _image_mime, classify_batch, extract_drafts
@@ -36,8 +37,10 @@ def run_ingest(
     on_stage: Callable[[str], None] = lambda stage: None,
 ) -> list[str]:
     """处理一次输入，返回新建笔记的 id（顺序与草稿一致）。"""
+    started = time.perf_counter()
     on_stage("拆分")
     drafts, _usage = extract_drafts(image, text)
+    extracted = time.perf_counter()
 
     on_stage("分类")
     results = classify_batch(
@@ -46,6 +49,8 @@ def run_ingest(
         taxonomy.load().tags,
         distinct_suggested_domains(index),
     )
+
+    classified = time.perf_counter()
 
     on_stage("写入")
     # 素材放到模型调用成功之后再存，提取失败时不在 assets/ 留孤儿文件
@@ -74,4 +79,11 @@ def run_ingest(
         git.commit(store.root, f"note: 新建 {len(ids)} 条 (来源 {kind})")
     except (subprocess.CalledProcessError, OSError) as exc:
         logger.warning("vault git 提交失败，笔记已写入但未提交: %s", exc)
+    logger.info(
+        "录入完成: %d 条, 拆分 %.1fs, 分类 %.1fs, 写入 %.1fs",
+        len(ids),
+        extracted - started,
+        classified - extracted,
+        time.perf_counter() - classified,
+    )
     return ids

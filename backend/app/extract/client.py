@@ -53,21 +53,25 @@ def get_extract_model(override: str | None = None):
     return _build(_resolve_model(override, config.EXTRACT_MODEL, "EXTRACT_MODEL"))
 
 
+def _no_thinking() -> dict | None:
+    return {"thinking": {"type": "disabled"}} if config.DISABLE_THINKING else None
+
+
 def get_classify_model(override: str | None = None):
-    """文本/分类模型(CLASSIFY_MODEL)。"""
-    return _build(_resolve_model(override, config.CLASSIFY_MODEL, "CLASSIFY_MODEL"))
+    """文本/分类模型(CLASSIFY_MODEL),默认关闭思考。
+
+    实测 glm-4.5-air 默认开着思考模式,分类一条草稿要 5 秒左右;关掉后不到 1 秒。
+    关闭思考后它的 function calling 输出是坏的,所以调用方必须用 bind_json。
+    """
+    name = _resolve_model(override, config.CLASSIFY_MODEL, "CLASSIFY_MODEL")
+    return _build(name, extra_body=_no_thinking())
 
 
 def get_expand_model(override: str | None = None):
-    """检索词扩展用的文本模型(CLASSIFY_MODEL),超时短、不重试、默认关闭思考。
-
-    实测 glm-4.5-air 默认开着思考模式,给几个检索词要 5 到 11 秒;关掉后 0.8 秒。
-    关闭思考后它的 function calling 输出是坏的,所以调用方必须用 json_mode。
-    """
+    """检索词扩展用的文本模型(CLASSIFY_MODEL),超时短、不重试、默认关闭思考。"""
     name = _resolve_model(override, config.CLASSIFY_MODEL, "CLASSIFY_MODEL")
-    extra_body = {"thinking": {"type": "disabled"}} if config.EXPAND_DISABLE_THINKING else None
     return _build(
-        name, timeout=_EXPAND_TIMEOUT_SECONDS, max_retries=0, extra_body=extra_body
+        name, timeout=_EXPAND_TIMEOUT_SECONDS, max_retries=0, extra_body=_no_thinking()
     )
 
 
@@ -82,3 +86,9 @@ def bind_structured(model, schema):
     return model.with_structured_output(
         schema, method=config.STRUCTURED_OUTPUT_METHOD, include_raw=True
     )
+
+
+def bind_json(model, schema):
+    """文本模型的辅助调用固定用 json_mode,不跟随 STRUCTURED_OUTPUT_METHOD:
+    关闭思考后 function calling 不可用。提示词里必须写明要输出的 JSON 字段。"""
+    return model.with_structured_output(schema, method="json_mode", include_raw=True)
