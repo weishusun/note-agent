@@ -41,6 +41,23 @@ class TaxonomyManager:
             return False
         return category in self.leaf_categories()
 
+    def match_category(self, q: str) -> str | None:
+        """查询词是否就是某个分类（SCHEMA 第 5 节 matched_category）。大小写不敏感精确匹配，
+        叶子优先于一级分类。"""
+        key = q.strip().casefold()
+        if not key:
+            return None
+        categories = self.load().categories
+        for parent, node in categories.items():
+            for child, leaf in node.children.items():
+                path = f"{parent}/{child}"
+                if key in (path.casefold(), child.casefold(), leaf.label.casefold()):
+                    return path
+        for parent, node in categories.items():
+            if key in (parent.casefold(), node.label.casefold()):
+                return parent
+        return None
+
     def filter_tags(self, tags: list[str]) -> tuple[list[str], list[str]]:
         """按受控词表过滤：返回 (保留的, 丢弃的)，保留原顺序并去重。"""
         allowed = set(self.load().tags)

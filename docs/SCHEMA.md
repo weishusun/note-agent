@@ -143,7 +143,8 @@ source:
 ```
 
 - `## 一句话` 必须与 frontmatter 的 `summary` 完全一致
-- `## 关联` 里的 `[[链接]]` 必须指向真实存在的文件名,不存在则不写
+- `## 关联` 里的 `[[链接]]` 必须指向真实存在的文件名,不存在则不写。一条可写的链接都没有时,
+  该区块保留标题,内容写 `（暂无）`
 - `kind=text` 用引用块;`kind=file` 给出文件链接和位置锚点
 
 **`kind=generated` 的额外规则:**
@@ -305,6 +306,9 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 `kind=generated` 时只需 `text`(用户原话)。
 
+第一版只接受 `screenshot`(必填 `image_b64`,可带 `data:image/png;base64,` 前缀)和
+`text`(必填 `text`,去首尾空白后 < 2000 字)。其余 kind 与不合法的请求体返回 `400`。
+
 ### `GET /api/jobs/{job_id}`
 
 ```jsonc
@@ -318,6 +322,9 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 }
 ```
 
+`created` 与 `inbox` **互不重叠**:本次新建的笔记里 `status=inbox` 的进 `inbox`,其余进 `created`。
+`job_id` 不存在返回 `404`。任务状态只存在进程内存里,服务重启后查不到。
+
 `duplicate: true` 时**不是错误**:输入此前处理过,返回的是当时的结果。要重新处理就带
 `force: true` 重发(见不变量 8)。
 
@@ -330,8 +337,8 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 `include_inbox` 默认 `false`。为 `true` 时 `status=inbox` 的笔记参与召回,且必须排在所有 `active` 笔记之后。
 
 **`matched_category` 是查询理解,不是查询参数回显。** 定义:把 `q` 与 taxonomy 的叶子路径、
-叶子 `label`、一级分类名做**大小写不敏感精确匹配**(与不变量 12 同一套规则),命中则填该分类
-路径,否则 `null`。
+叶子名(路径的后半段,如 `rag`)、叶子 `label`、一级分类名及其 `label` 做**大小写不敏感精确匹配**
+(与不变量 12 同一套规则),命中则填该分类路径,否则 `null`。叶子优先于一级分类。
 
 - 它**不参与 `results` 的排序**,是与 results 并列的第四路结果。
 - 用途:供前端提示「打开这个分类的 MOC」。用户搜「RAG」时,除了命中的笔记,还应该能一步

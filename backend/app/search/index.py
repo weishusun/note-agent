@@ -129,6 +129,29 @@ class SearchIndex:
             conn.execute("DELETE FROM notes WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM notes_fts WHERE path = ?", (rel_path,))
 
+    # ---------- 幂等日志（SCHEMA 不变量 8） ----------
+
+    def get_ingest_log(self, input_hash: str) -> list[str] | None:
+        """返回该输入上次创建的笔记 id；没处理过返回 None。"""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT result FROM ingest_log WHERE input_hash = ?", (input_hash,)
+            ).fetchone()
+        return None if row is None else json.loads(row[0])["created"]
+
+    def put_ingest_log(self, input_hash: str, created_ids: list[str], created_at: str) -> None:
+        result = json.dumps({"created": created_ids, "skipped": False})
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_log (input_hash, created_at, result)"
+                " VALUES (?, ?, ?)",
+                (input_hash, created_at, result),
+            )
+
+    def delete_ingest_log(self, input_hash: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM ingest_log WHERE input_hash = ?", (input_hash,))
+
     def rebuild_all(self) -> int:
         """清空后全量重建，扫描 notes/ 和 inbox/ 两个目录。返回索引的笔记数。"""
         with self.connect() as conn:

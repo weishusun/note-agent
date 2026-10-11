@@ -26,6 +26,19 @@ def test_filter_tags_drops_unknown(taxonomy: TaxonomyManager) -> None:
     assert dropped == ["自创标签", "另一个野标签"]
 
 
+def test_match_category(taxonomy: TaxonomyManager) -> None:
+    # 叶子路径 / 叶子名 / 叶子 label，大小写不敏感
+    assert taxonomy.match_category("AI-Engineering/RAG") == "ai-engineering/rag"
+    assert taxonomy.match_category(" rag ") == "ai-engineering/rag"
+    assert taxonomy.match_category("检索与上下文") == "ai-engineering/rag"
+    # 一级分类名 / label
+    assert taxonomy.match_category("cs-fundamentals") == "cs-fundamentals"
+    assert taxonomy.match_category("AI 工程") == "ai-engineering"
+    # 精确匹配，不做子串
+    assert taxonomy.match_category("检索") is None
+    assert taxonomy.match_category("") is None
+
+
 def test_cache_invalidated_on_mtime_change(vault_root: Path, taxonomy: TaxonomyManager) -> None:
     assert not taxonomy.is_valid_category("ai-engineering/new-leaf")
 

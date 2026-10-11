@@ -72,6 +72,19 @@ def list_inbox(index: SearchIndex) -> list[NoteRef]:
         return [_to_ref(row) for row in _dict_rows(cursor)]
 
 
+def refs_by_ids(index: SearchIndex, ids: list[str]) -> list[NoteRef]:
+    """按 id 取 NoteRef，顺序与 ids 一致；索引里已不存在的 id 直接略过。"""
+    if not ids:
+        return []
+    placeholders = ", ".join("?" for _ in ids)
+    with index.connect() as conn:
+        cursor = conn.execute(
+            f"SELECT {_ROW_COLUMNS} FROM notes WHERE id IN ({placeholders})", ids
+        )
+        by_id = {row["id"]: row for row in _dict_rows(cursor)}
+    return [_to_ref(by_id[i]) for i in ids if i in by_id]
+
+
 def distinct_suggested_domains(index: SearchIndex) -> list[tuple[str, int]]:
     """inbox 笔记里各 suggested_domain 的计数,按计数倒序(同数按名字稳定排序)。
 

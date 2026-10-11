@@ -1,13 +1,65 @@
+import base64
+import binascii
+import logging
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from pydantic import BaseModel
 
 from app.config import default_vault_root
+from app.ingest.jobs import JobRegistry, JobState
+from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
 from app.search.index import SearchIndex
-from app.search.query import list_inbox, search
-from app.vault.models import NoteRef, Taxonomy
+from app.search.query import list_inbox, refs_by_ids, search
+from app.vault.models import NoteRef, SourceKind, Taxonomy
 from app.vault.store import VaultStore
 from app.vault.taxonomy import TaxonomyManager
+
+logger = logging.getLogger(__name__)
+
+
+class IngestRequest(BaseModel):
+    kind: SourceKind
+    text: str | None = None
+    image_b64: str | None = None
+    file_b64: str | None = None
+    filename: str | None = None
+    force: bool = False
+
+
+def _parse_ingest(req: IngestRequest) -> tuple[str | None, bytes | None]:
+    """校验请求并取出 (text, image)，恰有一个非空。不合法抛 400。"""
+    if req.kind == "text":
+        text = (req.text or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="kind=text 需要非空 text")
+        if len(text) >= SHORT_TEXT_MAX_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"暂只支持 {SHORT_TEXT_MAX_CHARS} 字以内的短文本",
+            )
+        return text, None
+    if req.kind == "screenshot":
+        if not req.image_b64:
+            raise HTTPException(status_code=400, detail="kind=screenshot 需要 image_b64")
+        # 允许前端直接传 data URL
+        encoded = req.image_b64.split(",", 1)[1] if req.image_b64.startswith("data:") else req.image_b64
+        try:
+            image = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="image_b64 不是合法的 base64")
+        if not image:
+            raise HTTPException(status_code=400, detail="image_b64 解码后为空")
+        return None, image
+    raise HTTPException(status_code=400, detail=f"暂不支持的来源: {req.kind}")
+
+
+def _split_refs(refs: list[NoteRef]) -> dict[str, list[NoteRef]]:
+    return {
+        "created": [r for r in refs if r.status != "inbox"],
+        "inbox": [r for r in refs if r.status == "inbox"],
+    }
 
 
 def create_app(vault_root: Path | None = None) -> FastAPI:
@@ -15,6 +67,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     store = VaultStore(root)
     taxonomy = TaxonomyManager(root / "taxonomy.yaml")
     index = SearchIndex(store)
+    jobs = JobRegistry()
 
     app = FastAPI(title="note-agent")
 
@@ -25,6 +78,52 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     @app.get("/api/taxonomy")
     def api_taxonomy() -> Taxonomy:
         return taxonomy.load()
+
+    def run_job(job_id: str, kind: SourceKind, text: str | None, image: bytes | None, digest: str) -> None:
+        jobs.update(job_id, status="running")
+        try:
+            ids = run_ingest(
+                store,
+                taxonomy,
+                index,
+                kind=kind,
+                text=text,
+                image=image,
+                on_stage=lambda stage: jobs.update(job_id, stage=stage),
+            )
+            index.put_ingest_log(digest, ids, datetime.now().astimezone().isoformat())
+            jobs.update(job_id, status="done", **_split_refs(refs_by_ids(index, ids)))
+        except Exception as exc:
+            logger.exception("录入失败 job=%s", job_id)
+            jobs.update(job_id, status="failed", error=str(exc))
+
+    @app.post("/api/ingest", status_code=202)
+    def api_ingest(req: IngestRequest, background: BackgroundTasks) -> dict[str, str]:
+        text, image = _parse_ingest(req)
+        digest = input_hash(req.kind, image if image is not None else text.encode("utf-8"))
+
+        if not req.force:
+            previous = index.get_ingest_log(digest)
+            if previous is not None:
+                refs = refs_by_ids(index, previous)
+                if refs:
+                    job_id = jobs.create(
+                        status="done", stage="写入", duplicate=True, **_split_refs(refs)
+                    )
+                    return {"job_id": job_id}
+                # 当时建的笔记已全部不在了：按新输入处理
+                index.delete_ingest_log(digest)
+
+        job_id = jobs.create()
+        background.add_task(run_job, job_id, req.kind, text, image, digest)
+        return {"job_id": job_id}
+
+    @app.get("/api/jobs/{job_id}")
+    def api_job(job_id: str) -> JobState:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return job
 
     @app.get("/api/search")
     def api_search(
@@ -37,8 +136,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         results = search(
             index, q, category=category, tag=tag, include_inbox=include_inbox, limit=limit
         )
-        matched = category if taxonomy.is_valid_category(category) else None
-        return {"results": results, "matched_category": matched}
+        return {"results": results, "matched_category": taxonomy.match_category(q)}
 
     @app.get("/api/inbox")
     def api_inbox() -> list[NoteRef]:

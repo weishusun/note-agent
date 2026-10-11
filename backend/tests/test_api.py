@@ -59,7 +59,10 @@ def test_get_search(client: TestClient) -> None:
         "confidence",
     }
 
+    # matched_category 是对 q 的查询理解，不是 category 参数的回显
     resp = client.get("/api/search", params={"q": "", "category": "ai-engineering/rag"})
+    assert resp.json()["matched_category"] is None
+    resp = client.get("/api/search", params={"q": "rag"})
     assert resp.json()["matched_category"] == "ai-engineering/rag"
 
 
