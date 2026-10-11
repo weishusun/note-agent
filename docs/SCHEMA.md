@@ -385,6 +385,39 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 以磁盘为准全量重建索引(不变量 13)。读不了的笔记文件跳过并记日志,不让重建失败。
 服务**启动时自动执行一次**;用户在 Obsidian 里改动笔记后可手动触发。
 
+### `GET /api/settings` / `PUT /api/settings`
+
+模型设置。不属于 vault:保存在 `note-agent/settings.json`(含密钥,不入 git),逐项覆盖 `.env` 的默认值,
+保存后立即生效。
+
+```jsonc
+// GET 的响应，也是 PUT 的响应
+{
+  "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+  "api_key_set": true,
+  "api_key_hint": "abcd",              // 末四位；密钥不足 8 位时为 null
+  "extract_model": "…",                 // 必须支持图片
+  "classify_model": "…",                // 也用于压缩超长文本和扩展检索词
+  "answer_model": "",                   // 空 = 沿用 classify_model
+  "structured_output_method": "function_calling",   // function_calling | json_mode，只影响提取
+  "disable_thinking": true,             // 分类等小调用关闭思考（智谱专有参数）
+  "extract_disable_thinking": false     // 提取也关闭思考：快，但可能漏内容
+}
+```
+
+- **密钥只进不出。** 任何接口都不返回完整密钥。
+- `PUT` 只改请求体里带了的字段;`api_key` 为空或不带表示保持不变。`base_url` 必须以 `http(s)://` 开头。
+- 某项存成空字符串表示「没填」,退回 `.env` 的默认值。
+
+### `POST /api/settings/test`
+
+用已保存的设置各发一次真实请求:分类模型一句话,提取模型一张小图。
+
+```jsonc
+{ "text": { "ok": true, "detail": "正常", "seconds": 0.8 },
+  "vision": { "ok": false, "detail": "…错误原因…", "seconds": 1.2 } }
+```
+
 ### `GET /api/taxonomy` → taxonomy.yaml 的解析结果
 
 ### `GET /api/inbox` → `[NoteRef]`

@@ -40,6 +40,14 @@ tags:
 """
 
 
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """任何测试都不许读写真实的 note-agent/settings.json（里面有密钥）。"""
+    path = tmp_path / "settings.json"
+    monkeypatch.setenv("NOTE_AGENT_SETTINGS", str(path))
+    return path
+
+
 @pytest.fixture
 def vault_root(tmp_path: Path) -> Path:
     root = tmp_path / "vault"

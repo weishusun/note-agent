@@ -4,6 +4,7 @@ import { AskPanel } from "@/components/AskPanel"
 import { IngestPanel } from "@/components/IngestPanel"
 import { NoteDialog } from "@/components/NoteDialog"
 import { NotesPanel } from "@/components/NotesPanel"
+import { SettingsPanel } from "@/components/SettingsPanel"
 import { linkTarget, type NoteRef, type NoteTarget } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
@@ -11,6 +12,7 @@ const TABS = [
   { id: "ingest", label: "录入" },
   { id: "ask", label: "提问" },
   { id: "notes", label: "笔记" },
+  { id: "settings", label: "设置" },
 ] as const
 
 type TabId = (typeof TABS)[number]["id"]
@@ -58,6 +60,9 @@ function App() {
         </div>
         <div hidden={tab !== "notes"}>
           <NotesPanel active={tab === "notes"} onOpenNote={openRef} />
+        </div>
+        <div hidden={tab !== "settings"}>
+          <SettingsPanel active={tab === "settings"} />
         </div>
       </main>
 

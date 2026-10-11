@@ -41,7 +41,7 @@ DISABLE_THINKING: bool = os.environ.get("DISABLE_THINKING", "true").lower() != "
 
 
 def require_api_key() -> str:
-    """在真正建模型前调用。缺 key 立刻抛可读错误,不拖到调用时才 401。"""
+    """只给 evals 脚本用:它们只认 .env。应用本身经 app.settings 取密钥(设置页的值优先)。"""
     if not ZHIPU_API_KEY:
         raise RuntimeError("请在 note-agent/.env 中配置 ZHIPU_API_KEY")
     return ZHIPU_API_KEY

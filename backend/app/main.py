@@ -17,6 +17,7 @@ from app.ingest.jobs import JobRegistry, JobState
 from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
 from app.search.index import SearchIndex
 from app.search.query import list_inbox, list_recent, refs_by_ids, search
+from app.settings_api import router as settings_router
 from app.vault.models import NoteRef, SourceKind, Taxonomy
 from app.vault.store import VaultStore
 from app.vault.taxonomy import TaxonomyManager
@@ -97,6 +98,8 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="note-agent", lifespan=lifespan)
+
+    app.include_router(settings_router)
 
     @app.get("/health")
     def health() -> dict[str, str]:

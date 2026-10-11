@@ -11,6 +11,8 @@ dist/
 
 # Env
 .env
+# 设置页保存的接口地址/密钥/模型，含密钥，不入库
+/settings.json
 
 # Logs
 *.log

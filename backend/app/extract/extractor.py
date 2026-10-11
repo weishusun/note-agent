@@ -22,7 +22,13 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from app.extract.client import bind_json, bind_structured, get_classify_model, get_extract_model
+from app.extract.client import (
+    bind_json,
+    bind_structured,
+    extract_uses_json_mode,
+    get_classify_model,
+    get_extract_model,
+)
 from app.extract.models import (
     ALIASES_MAX,
     DRAFTS_MAX,
@@ -437,6 +443,9 @@ def _load_prompt(name: str) -> str:
 
 def _extract_messages(image: bytes | None, text: str | None) -> list:
     system = _load_prompt("extract_zh.md")
+    if extract_uses_json_mode():
+        # json_mode 下模型看不到 schema,必须在提示词里写明输出结构
+        system += _load_prompt("extract_format_json.md")
     parts: list[dict] = []
     if text and text.strip():
         parts.append({"type": "text", "text": "# 待处理输入\n" + text.strip()})
