@@ -184,6 +184,16 @@ class VaultStore:
 
     # ---------- 素材 ----------
 
+    def read_asset(self, name: str) -> bytes:
+        """读 assets/ 下的一个文件，供 HTTP 层回传截图。只接受文件名，不接受路径。"""
+        if not name or Path(name).name != name:
+            raise ValueError(f"非法的素材名: {name}")
+        target = self.assets_dir / name
+        if not target.is_file():
+            raise FileNotFoundError(f"素材不存在: {name}")
+        with open(target, "rb") as f:
+            return f.read()
+
     def save_asset(self, data: bytes, ext: str) -> str:
         """存入 assets/，返回相对 vault 根的 posix 路径，如 assets/2026-07-30-142211.png。"""
         suffix = "." + ext.lstrip(".").lower()

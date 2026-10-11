@@ -99,3 +99,72 @@ def test_get_note(client: TestClient) -> None:
 
     assert client.get("/api/notes/notes/不存在.md").status_code == 404
     assert client.get("/api/notes/..%2f..%2fsecret.md").status_code in (400, 404)
+
+
+# ---------- 笔记列表 / 重建索引 / 素材 ----------
+
+
+def test_list_notes_recent_first_including_inbox(client: TestClient) -> None:
+    data = client.get("/api/notes").json()
+    assert {r["title"] for r in data} == {"RAG 检索增强生成", "检索增强踩坑记录"}
+    assert len(client.get("/api/notes", params={"limit": 1}).json()) == 1
+    assert client.get("/api/notes", params={"limit": 0}).status_code == 422
+
+
+def test_list_notes_orders_by_updated_desc(
+    vault_root: Path, store: VaultStore, index: SearchIndex
+) -> None:
+    for title, day in (("旧笔记", 1), ("新笔记", 9), ("中间的笔记", 5)):
+        note = make_note(title=title, aliases=[])
+        stamp = note.frontmatter.updated.replace(day=day)
+        note.frontmatter = note.frontmatter.model_copy(update={"updated": stamp})
+        store.create_note(note)
+        index.upsert_note(note)
+
+    titles = [r["title"] for r in TestClient(create_app(vault_root)).get("/api/notes").json()]
+    assert titles == ["新笔记", "中间的笔记", "旧笔记"]
+
+
+def test_reindex_follows_the_disk(client: TestClient, vault_root: Path) -> None:
+    """不变量 13：用户在 Obsidian 里删了一条、手写了一条坏的、又加了一条好的。"""
+    (vault_root / "inbox/检索增强踩坑记录.md").unlink()
+    (vault_root / "notes/手写的坏笔记.md").write_text("没有 frontmatter 的纯文本\n", encoding="utf-8")
+    good = (vault_root / "notes/RAG 检索增强生成.md").read_text(encoding="utf-8")
+    (vault_root / "notes/手动复制的笔记.md").write_text(
+        good.replace("title: RAG 检索增强生成", "title: 手动复制的笔记").replace(
+            good.split("id: ")[1].split("\n")[0], "null"
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/reindex")
+    assert resp.status_code == 200
+    assert resp.json() == {"indexed": 2}  # 坏笔记被跳过，不让重建失败
+    assert {r["title"] for r in client.get("/api/notes").json()} == {
+        "RAG 检索增强生成",
+        "手动复制的笔记",
+    }
+
+
+def test_startup_rebuilds_index_from_disk(vault_root: Path, store: VaultStore) -> None:
+    store.create_note(make_note())  # 只落盘、不入索引：模拟索引落后于磁盘
+    app = create_app(vault_root)
+
+    assert TestClient(app).get("/api/notes").json() == []  # 不走 lifespan 时索引是空的
+    with TestClient(app) as started:
+        assert [r["title"] for r in started.get("/api/notes").json()] == ["RAG 检索增强生成"]
+
+
+def test_get_asset(client: TestClient, store: VaultStore) -> None:
+    rel = store.save_asset(b"\x89PNG-bytes", "png")
+    name = rel.split("/")[1]
+
+    resp = client.get(f"/api/assets/{name}")
+    assert resp.status_code == 200
+    assert resp.content == b"\x89PNG-bytes"
+    assert resp.headers["content-type"] == "image/png"
+
+    assert client.get("/api/assets/不存在.png").status_code == 404
+    # 不能借素材接口读 vault 里别的文件
+    assert client.get("/api/assets/..%2ftaxonomy.yaml").status_code in (400, 404)
+    assert client.get("/api/assets/%2e%2e%5ctaxonomy.yaml").status_code in (400, 404)

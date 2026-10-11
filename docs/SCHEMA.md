@@ -370,7 +370,20 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   同一个理由:模型生成的内容不能和你自己记的内容长得一样。
 - 模型调用失败返回 `502`。问答模型读环境变量 `ANSWER_MODEL`,未配置时沿用 `CLASSIFY_MODEL`。
 
+### `GET /api/notes?limit=50` → `[NoteRef]`
+
+最近更新的笔记,新的在前。含 inbox,不含 `archived`。`limit` 1–200。
+
 ### `GET /api/notes/{path}` → `{ "frontmatter": {...}, "body": "..." }`
+
+### `GET /api/assets/{name}` → 文件内容
+
+`assets/` 下的一个素材(截图)。`name` 只能是文件名,不接受路径;不存在返回 `404`。
+
+### `POST /api/reindex` → `{ "indexed": 12 }`
+
+以磁盘为准全量重建索引(不变量 13)。读不了的笔记文件跳过并记日志,不让重建失败。
+服务**启动时自动执行一次**;用户在 Obsidian 里改动笔记后可手动触发。
 
 ### `GET /api/taxonomy` → taxonomy.yaml 的解析结果
 

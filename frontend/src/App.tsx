@@ -3,19 +3,26 @@ import { useCallback, useState } from "react"
 import { AskPanel } from "@/components/AskPanel"
 import { IngestPanel } from "@/components/IngestPanel"
 import { NoteDialog } from "@/components/NoteDialog"
-import type { NoteRef } from "@/lib/api"
+import { NotesPanel } from "@/components/NotesPanel"
+import { linkTarget, type NoteRef, type NoteTarget } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 const TABS = [
   { id: "ingest", label: "录入" },
   { id: "ask", label: "提问" },
+  { id: "notes", label: "笔记" },
 ] as const
 
 type TabId = (typeof TABS)[number]["id"]
 
 function App() {
   const [tab, setTab] = useState<TabId>("ingest")
-  const [openNote, setOpenNote] = useState<NoteRef | null>(null)
+  const [openNote, setOpenNote] = useState<NoteTarget | null>(null)
+  const openRef = useCallback(
+    (note: NoteRef) => setOpenNote({ title: note.title, paths: [note.path] }),
+    [],
+  )
+  const openLink = useCallback((stem: string) => setOpenNote(linkTarget(stem)), [])
   const closeNote = useCallback(() => setOpenNote(null), [])
 
   return (
@@ -41,17 +48,20 @@ function App() {
         </nav>
       </header>
 
-      {/* 两个面板都保持挂载，切换标签不丢输入和结果 */}
+      {/* 面板都保持挂载，切换标签不丢输入和结果 */}
       <main>
         <div hidden={tab !== "ingest"}>
-          <IngestPanel active={tab === "ingest" && openNote === null} onOpenNote={setOpenNote} />
+          <IngestPanel active={tab === "ingest" && openNote === null} onOpenNote={openRef} />
         </div>
         <div hidden={tab !== "ask"}>
-          <AskPanel onOpenNote={setOpenNote} />
+          <AskPanel onOpenNote={openRef} />
+        </div>
+        <div hidden={tab !== "notes"}>
+          <NotesPanel active={tab === "notes"} onOpenNote={openRef} />
         </div>
       </main>
 
-      {openNote && <NoteDialog note={openNote} onClose={closeNote} />}
+      {openNote && <NoteDialog target={openNote} onOpenLink={openLink} onClose={closeNote} />}
     </div>
   )
 }

@@ -6,12 +6,17 @@ tokenize='trigram' 不可改：FTS5 默认分词器按空格切词，中文检�
 
 import hashlib
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from typing import Iterator
 
+import yaml
+
 from app.vault.models import Note
 from app.vault.store import VaultStore
+
+logger = logging.getLogger(__name__)
 
 # 与 SCHEMA.md 第 4 节一字不差
 _SCHEMA_SQL = """
@@ -153,13 +158,21 @@ class SearchIndex:
             conn.execute("DELETE FROM ingest_log WHERE input_hash = ?", (input_hash,))
 
     def rebuild_all(self) -> int:
-        """清空后全量重建，扫描 notes/ 和 inbox/ 两个目录。返回索引的笔记数。"""
+        """清空后全量重建，扫描 notes/ 和 inbox/ 两个目录。返回索引的笔记数。
+
+        读不了的文件（用户在 Obsidian 里手写、frontmatter 不合契约）跳过并告警，
+        不让一条坏笔记拖垮整个索引（SCHEMA 不变量 13）。
+        """
         with self.connect() as conn:
             conn.execute("DELETE FROM notes")
             conn.execute("DELETE FROM notes_fts")
             count = 0
             for rel in self.store.list_notes(include_inbox=True):
-                note = self.store.read_note(rel)
-                self._upsert(conn, note)
+                try:
+                    note = self.store.read_note(rel)
+                    self._upsert(conn, note)
+                except (ValueError, OSError, yaml.YAMLError, sqlite3.IntegrityError) as exc:
+                    logger.warning("重建索引时跳过 %s: %s", rel.as_posix(), exc)
+                    continue
                 count += 1
             return count

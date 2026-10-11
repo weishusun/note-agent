@@ -1,10 +1,14 @@
 import base64
 import binascii
 import logging
+import mimetypes
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
 from app.ask.answer import AskResult, answer_question
@@ -12,7 +16,7 @@ from app.config import default_vault_root
 from app.ingest.jobs import JobRegistry, JobState
 from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
 from app.search.index import SearchIndex
-from app.search.query import list_inbox, refs_by_ids, search
+from app.search.query import list_inbox, list_recent, refs_by_ids, search
 from app.vault.models import NoteRef, SourceKind, Taxonomy
 from app.vault.store import VaultStore
 from app.vault.taxonomy import TaxonomyManager
@@ -82,7 +86,17 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     index = SearchIndex(store)
     jobs = JobRegistry()
 
-    app = FastAPI(title="note-agent")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # 启动时以磁盘为准重建索引：用户可能在 Obsidian 里增删改过笔记（SCHEMA 不变量 13）。
+        # 放在 lifespan 而不是 create_app 里：导入本模块不该去写 vault
+        try:
+            logger.info("启动时重建索引: %d 条笔记", index.rebuild_all())
+        except Exception:
+            logger.exception("启动时重建索引失败，沿用现有索引")
+        yield
+
+    app = FastAPI(title="note-agent", lifespan=lifespan)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -158,6 +172,25 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         except Exception as exc:
             logger.exception("问答失败")
             raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}")
+
+    @app.get("/api/notes")
+    def api_notes(limit: int = Query(default=50, ge=1, le=200)) -> list[NoteRef]:
+        return list_recent(index, limit)
+
+    @app.post("/api/reindex")
+    def api_reindex() -> dict[str, int]:
+        return {"indexed": index.rebuild_all()}
+
+    @app.get("/api/assets/{name}")
+    def api_asset(name: str) -> Response:
+        try:
+            data = store.read_asset(name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="素材不存在")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="非法的素材名")
+        media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        return Response(content=data, media_type=media_type)
 
     @app.get("/api/inbox")
     def api_inbox() -> list[NoteRef]:

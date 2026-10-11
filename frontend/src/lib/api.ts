@@ -33,8 +33,27 @@ export interface AskResult {
 }
 
 export interface NoteDetail {
-  frontmatter: { title: string; source: { kind: string; ref: string } }
+  frontmatter: {
+    title: string
+    category: string | null
+    suggested_domain: string | null
+    aliases: string[]
+    verified: boolean
+    updated: string
+    source: { kind: string; ref: string }
+  }
   body: string
+}
+
+// 要打开的笔记。从双链点进来时只知道文件名、不知道它在 notes/ 还是 inbox/，
+// 所以 paths 是按顺序尝试的候选路径
+export interface NoteTarget {
+  title: string
+  paths: string[]
+}
+
+export function linkTarget(stem: string): NoteTarget {
+  return { title: stem, paths: [`notes/${stem}.md`, `inbox/${stem}.md`] }
 }
 
 export type IngestInput =
@@ -78,6 +97,12 @@ export const api = {
   ingest: (input: IngestInput) => post<{ job_id: string }>("/api/ingest", input),
   job: (jobId: string) => request<JobState>(`/api/jobs/${encodeURIComponent(jobId)}`),
   ask: (question: string) => post<AskResult>("/api/ask", { question }),
+  notes: (limit = 100) => request<NoteRef[]>(`/api/notes?limit=${limit}`),
+  search: (q: string) =>
+    request<{ results: NoteRef[] }>(
+      `/api/search?include_inbox=true&limit=50&q=${encodeURIComponent(q)}`,
+    ).then((data) => data.results),
+  reindex: () => post<{ indexed: number }>("/api/reindex", {}),
   note: (path: string) =>
     request<NoteDetail>(`/api/notes/${path.split("/").map(encodeURIComponent).join("/")}`),
 }

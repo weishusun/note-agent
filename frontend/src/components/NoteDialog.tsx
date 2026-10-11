@@ -1,29 +1,52 @@
 import { useEffect, useState } from "react"
 import { XIcon } from "lucide-react"
 
+import { NoteBody } from "@/components/NoteBody"
 import { Button } from "@/components/ui/button"
-import { api, type NoteDetail, type NoteRef } from "@/lib/api"
+import { api, type NoteDetail, type NoteTarget } from "@/lib/api"
 
-export function NoteDialog({ note, onClose }: { note: NoteRef; onClose: () => void }) {
-  const [detail, setDetail] = useState<NoteDetail | null>(null)
-  const [error, setError] = useState<string | null>(null)
+type Loaded = { path: string; detail: NoteDetail } | { error: string }
+
+export function NoteDialog({
+  target,
+  onOpenLink,
+  onClose,
+}: {
+  target: NoteTarget
+  onOpenLink: (stem: string) => void
+  onClose: () => void
+}) {
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    api
-      .note(note.path)
-      .then((d) => !cancelled && setDetail(d))
-      .catch((e: Error) => !cancelled && setError(e.message))
+    setLoaded(null)
+    void (async () => {
+      let lastError = "笔记不存在"
+      for (const path of target.paths) {
+        try {
+          const detail = await api.note(path)
+          if (!cancelled) setLoaded({ path, detail })
+          return
+        } catch (e) {
+          lastError = (e as Error).message
+        }
+      }
+      if (!cancelled) setLoaded({ error: lastError })
+    })()
     return () => {
       cancelled = true
     }
-  }, [note.path])
+  }, [target])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose()
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
   }, [onClose])
+
+  const detail = loaded && "detail" in loaded ? loaded.detail : null
+  const frontmatter = detail?.frontmatter
 
   return (
     <div
@@ -33,27 +56,36 @@ export function NoteDialog({ note, onClose }: { note: NoteRef; onClose: () => vo
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={note.title}
+        aria-label={frontmatter?.title ?? target.title}
         className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl border bg-background shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b p-4">
           <div className="min-w-0 flex-1">
-            <h2 className="text-base font-semibold">{note.title}</h2>
-            <p className="mt-0.5 truncate text-xs text-muted-foreground">{note.path}</p>
+            <h2 className="text-base font-semibold">{frontmatter?.title ?? target.title}</h2>
+            {frontmatter && (
+              <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span>
+                  {frontmatter.category ?? `待整理 · ${frontmatter.suggested_domain ?? "未知领域"}`}
+                </span>
+                <span>{frontmatter.updated.slice(0, 10)}</span>
+                {!frontmatter.verified && <span>未核实</span>}
+                {frontmatter.aliases.length > 0 && (
+                  <span>别名：{frontmatter.aliases.join("、")}</span>
+                )}
+              </p>
+            )}
           </div>
           <Button variant="ghost" size="icon-sm" aria-label="关闭" onClick={onClose}>
             <XIcon />
           </Button>
         </header>
         <div className="overflow-y-auto p-4">
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          {!error && !detail && <p className="text-sm text-muted-foreground">加载中…</p>}
-          {detail && (
-            <pre className="font-sans text-sm leading-relaxed whitespace-pre-wrap">
-              {detail.body.trim()}
-            </pre>
+          {!loaded && <p className="text-sm text-muted-foreground">加载中…</p>}
+          {loaded && "error" in loaded && (
+            <p className="text-sm text-destructive">{loaded.error}</p>
           )}
+          {detail && <NoteBody body={detail.body} onOpenLink={onOpenLink} />}
         </div>
       </div>
     </div>

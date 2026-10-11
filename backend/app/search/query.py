@@ -143,6 +143,17 @@ def retrieve_for_question(
     return [ref for _key, ref in scored[:limit]]
 
 
+def list_recent(index: SearchIndex, limit: int = 50) -> list[NoteRef]:
+    """GET /api/notes：最近更新的笔记（含 inbox，不含 archived），新的在前。"""
+    with index.connect() as conn:
+        cursor = conn.execute(
+            f"SELECT {_ROW_COLUMNS} FROM notes WHERE status != 'archived'"
+            " ORDER BY updated DESC, path LIMIT ?",
+            (limit,),
+        )
+        return [_to_ref(row) for row in _dict_rows(cursor)]
+
+
 def note_vocabulary(index: SearchIndex, limit: int = 200) -> list[str]:
     """知识库的「词表」：最近更新的若干条笔记的标题，别名附在括号里。
 
