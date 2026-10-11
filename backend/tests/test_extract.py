@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.extract import extractor
-from app.extract.models import ClassifyResult, NoteDraft
+from app.extract.models import NoteDraft
 
 
 class _RawStub:
@@ -92,105 +92,6 @@ def _draft(**kwargs) -> NoteDraft:
     )
     base.update(kwargs)
     return NoteDraft(**base)
-
-
-# ---------- 1. leaves 为空 ----------
-
-
-def test_empty_leaves_goes_suggested_domain(monkeypatch: pytest.MonkeyPatch) -> None:
-    raw = ClassifyResult(
-        category=None, suggested_domain="量子力学", tags=[], confidence=0.7, reason="x"
-    )
-    runnable = _patch_classify(monkeypatch, [_ok(raw)])
-
-    result, usage = extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
-
-    assert result.category is None
-    assert result.suggested_domain == "量子力学"
-    assert result.confidence == 0.0  # suggested_domain 路径强制 0
-    assert usage["model"] == "fake-model"
-    assert runnable.calls == 1  # 无需语义重试
-
-
-# ---------- 2. category 非法 → 重试 → 仍非法 → None ----------
-
-
-def test_illegal_category_retries_then_nulls(monkeypatch: pytest.MonkeyPatch) -> None:
-    leaves = ["physics/quantum-mechanics"]
-    bad1 = ClassifyResult(category="physics/nope", suggested_domain="量子力学", confidence=0.9)
-    bad2 = ClassifyResult(category="physics/still-wrong", suggested_domain="量子力学", confidence=0.9)
-    runnable = _patch_classify(monkeypatch, [_ok(bad1), _ok(bad2)])
-
-    result, usage = extractor.classify(_draft(), leaves=leaves, tags=[], known_domains=[])
-
-    assert result.category is None
-    assert result.confidence == 0.0
-    # 两次调用的 token 累加
-    assert usage["input_tokens"] == 20 and usage["output_tokens"] == 10
-    assert runnable.calls == 2  # 一次语义重试
-
-
-def test_legal_category_kept(monkeypatch: pytest.MonkeyPatch) -> None:
-    leaves = ["physics/quantum-mechanics"]
-    raw = ClassifyResult(
-        category="physics/quantum-mechanics", suggested_domain=None, confidence=0.83
-    )
-    runnable = _patch_classify(monkeypatch, [_ok(raw)])
-
-    result, _usage = extractor.classify(_draft(), leaves=leaves, tags=[], known_domains=[])
-
-    assert result.category == "physics/quantum-mechanics"
-    assert result.suggested_domain is None
-    assert result.confidence == 0.83
-    assert runnable.calls == 1
-
-
-# ---------- 3. 词表外标签被丢弃 ----------
-
-
-def test_tags_outside_vocab_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-    leaves = ["physics/quantum-mechanics"]
-    tags = ["算符代数", "待深入"]
-    raw = ClassifyResult(
-        category="physics/quantum-mechanics",
-        tags=["算符代数", "不存在的标签", "待深入"],
-        confidence=0.8,
-    )
-    _patch_classify(monkeypatch, [_ok(raw)])
-
-    result, _usage = extractor.classify(_draft(), leaves=leaves, tags=tags, known_domains=[])
-
-    assert result.tags == ["算符代数", "待深入"]
-
-
-# ---------- 4. suggested_domain 长度非法 → 重试 ----------
-
-
-@pytest.mark.parametrize("bad_domain", ["量", "量子力学导论理论体"])  # 1 字 / 9 字
-def test_bad_suggested_domain_length_retries(
-    monkeypatch: pytest.MonkeyPatch, bad_domain: str
-) -> None:
-    assert len(bad_domain) in (1, 9)
-    bad = ClassifyResult(category=None, suggested_domain=bad_domain, confidence=0.0)
-    good = ClassifyResult(category=None, suggested_domain="量子力学", confidence=0.0)
-    runnable = _patch_classify(monkeypatch, [_ok(bad), _ok(good)])
-
-    result, _usage = extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
-
-    assert result.suggested_domain == "量子力学"
-    assert runnable.calls == 2
-
-
-# ---------- 5. 结构化输出解析失败 → 重试一次 → 仍失败抛异常 ----------
-
-
-def test_parse_failure_retries_once_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    runnable = _patch_classify(monkeypatch, [_fail()])  # 每次都失败
-
-    with pytest.raises(extractor.ExtractError):
-        extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
-
-    assert runnable.calls == 2  # 首次 + 一次重试
 
 
 # ---------- 6. NoteDraft 字段长度约束 ----------
@@ -351,92 +252,11 @@ def test_extract_error_message_is_short(monkeypatch: pytest.MonkeyPatch) -> None
     assert str(info.value) == "模型输出不合法,已重试一次仍失败: 坏 json"
 
 
-def test_semantic_retry_tells_the_model_what_was_wrong(monkeypatch: pytest.MonkeyPatch) -> None:
-    bad = ClassifyResult(category="physics/nope", confidence=0.9)
-    good = ClassifyResult(category="physics/quantum-mechanics", confidence=0.9)
-    runnable = _patch_classify(monkeypatch, [_ok(bad), _ok(good)])
-
-    result, _usage = extractor.classify(
-        _draft(), leaves=["physics/quantum-mechanics"], tags=[], known_domains=[]
-    )
-
-    assert result.category == "physics/quantum-mechanics"
-    assert "physics/nope" in runnable.messages[1][-1].content
-    assert runnable.model.schema is ClassifyResult
-
-
-def test_empty_leaves_uses_schema_with_required_domain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """分类表为空时 suggested_domain 在 schema 里必填,模型没法像可选字段那样直接省略。"""
-    parsed = extractor._DomainResult(suggested_domain="人工智能", reason="x")
-    runnable = _patch_classify(monkeypatch, [_ok(parsed)])
-
-    result, _usage = extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
-
-    assert runnable.model.schema is extractor._DomainResult
-    assert "suggested_domain" in extractor._DomainResult.model_json_schema()["required"]
-    assert (result.category, result.suggested_domain, result.confidence) == (None, "人工智能", 0.0)
-
-
 def test_extract_drafts_requires_some_input() -> None:
     with pytest.raises(ValueError):
         extractor.extract_drafts(image=None, text="   ")
     with pytest.raises(ValueError):
         extractor.extract_drafts(image=None, text=None)
-
-
-# ---------- P0:leaves 为空必须产出 suggested_domain ----------
-
-
-def test_empty_leaves_missing_domain_retries_then_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # 实测过的失败:reason 是「没有合适的分类叶子」而 suggested_domain 直接缺失
-    missing = ClassifyResult(
-        category=None, suggested_domain=None, confidence=0.0, reason="没有合适的分类叶子"
-    )
-    good = ClassifyResult(category=None, suggested_domain="量子力学", confidence=0.0)
-    runnable = _patch_classify(monkeypatch, [_ok(missing), _ok(good)])
-
-    result, _usage = extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
-
-    assert result.suggested_domain == "量子力学"
-    assert runnable.calls == 2  # 缺失触发一次重试
-
-
-def test_empty_leaves_domain_still_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    missing = ClassifyResult(category=None, suggested_domain=None, confidence=0.0)
-    runnable = _patch_classify(monkeypatch, [_ok(missing)])  # 每次都缺失
-
-    with pytest.raises(extractor.ExtractError):
-        extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
-
-    assert runnable.calls == 2  # 重试一次后仍缺失才抛
-
-
-def test_category_null_string_normalized_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    leaves = ["physics/quantum-mechanics"]
-    # 模型把 JSON null 写成了字符串 "null"
-    raw = ClassifyResult(category="null", suggested_domain="量子力学", confidence=0.0)
-    runnable = _patch_classify(monkeypatch, [_ok(raw)])
-
-    result, _usage = extractor.classify(_draft(), leaves=leaves, tags=[], known_domains=[])
-
-    assert result.category is None
-    assert result.suggested_domain == "量子力学"
-    assert runnable.calls == 1  # 归一后领域名合法,无需重试
-
-
-def test_suggested_domain_null_string_treated_as_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bad = ClassifyResult(category=None, suggested_domain="null", confidence=0.0)
-    good = ClassifyResult(category=None, suggested_domain="量子力学", confidence=0.0)
-    runnable = _patch_classify(monkeypatch, [_ok(bad), _ok(good)])
-
-    result, _usage = extractor.classify(_draft(), leaves=[], tags=[], known_domains=[])
-
-    assert result.suggested_domain == "量子力学"
-    assert runnable.calls == 2  # 字符串 "null" 视为缺失,触发重试
 
 
 # ---------- P1:extract 提炼质量(只测校验逻辑,不调 API) ----------
@@ -481,43 +301,3 @@ def test_notedraft_allows_single_point() -> None:
 def test_notedraft_rejects_zero_points() -> None:
     with pytest.raises(ValidationError):
         _draft(points=[])
-
-
-# ---------- classify_batch:单次录入内逐条累积领域 ----------
-
-
-def _fake_classify(returns_domain):
-    """替身:记录每次收到的 known_domains,按 returns_domain(draft)->str 产出结果。"""
-    seen: list[list[tuple[str, int]]] = []
-
-    def fake(draft, leaves, tags, known_domains, override=None):
-        seen.append(list(known_domains))
-        cr = ClassifyResult(
-            category=None, suggested_domain=returns_domain(draft), confidence=0.0
-        )
-        return cr, {"input_tokens": 0, "output_tokens": 0, "model": "x"}
-
-    return fake, seen
-
-
-def test_classify_batch_accumulates_domain(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake, seen = _fake_classify(lambda draft: "量子力学")
-    monkeypatch.setattr(extractor, "classify", fake)
-
-    results = extractor.classify_batch(
-        [_draft(), _draft(title="泡利矩阵")], leaves=[], tags=[], known_domains=[]
-    )
-
-    assert len(results) == 2
-    assert seen[0] == []  # 第一条:还没有已知领域
-    assert ("量子力学", 1) in seen[1]  # 第二条:能看到第一条定的领域
-
-
-def test_classify_batch_preserves_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake, _seen = _fake_classify(lambda draft: draft.title)
-    monkeypatch.setattr(extractor, "classify", fake)
-
-    drafts = [_draft(title="甲组"), _draft(title="乙组"), _draft(title="丙组")]
-    results = extractor.classify_batch(drafts, leaves=[], tags=[], known_domains=[])
-
-    assert [r.suggested_domain for r in results] == ["甲组", "乙组", "丙组"]

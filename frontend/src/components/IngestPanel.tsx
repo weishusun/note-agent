@@ -203,7 +203,7 @@ export function IngestPanel({
 }
 
 function StageProgress({ stage }: { stage: JobState["stage"] }) {
-  const current = STAGES.indexOf(stage)
+  const current = (STAGES as readonly string[]).indexOf(stage)
   return (
     <ol className="flex items-center gap-1.5 text-xs" aria-label="处理进度">
       {STAGES.map((name, i) => (

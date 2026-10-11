@@ -18,35 +18,40 @@ from app.vault.store import VaultStore
 
 logger = logging.getLogger(__name__)
 
-# 与 SCHEMA.md 第 4 节一字不差
-_SCHEMA_SQL = """
+# 三段拼起来与 SCHEMA.md 第 4 节一字不差。分开存是因为表结构升级时只重建前后两张派生表
+_NOTES_SQL = """
 CREATE TABLE notes (
   path              TEXT PRIMARY KEY,   -- 相对 vault 根
   id                TEXT UNIQUE,        -- 26 字符 ULID，可空：UNIQUE 允许多个 NULL
   title             TEXT NOT NULL,
-  category          TEXT,
-  suggested_domain  TEXT,
+  category          TEXT,               -- 「大块/小块」，可空
+  category_locked   INTEGER NOT NULL,   -- 0/1
   tags              TEXT NOT NULL,      -- JSON array
   aliases           TEXT NOT NULL,      -- JSON array
   summary           TEXT NOT NULL,
   status            TEXT NOT NULL,
-  verified          INTEGER NOT NULL,   -- 0/1
   confidence        REAL NOT NULL,
   content_hash      TEXT NOT NULL,
   updated           TEXT NOT NULL
 );
-
+"""
+_INGEST_LOG_SQL = """
 CREATE TABLE ingest_log (
   input_hash    TEXT PRIMARY KEY,   -- 输入内容 SHA256，用于幂等
   created_at    TEXT NOT NULL,
   result        TEXT NOT NULL       -- JSON: {created: [id], skipped: bool}
 );
-
+"""
+_FTS_SQL = """
 CREATE VIRTUAL TABLE notes_fts USING fts5(
   path UNINDEXED, title, aliases, summary, body,
   tokenize = 'trigram'
 );
 """
+_SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL
+
+# 记在 PRAGMA user_version 里，与 SCHEMA.md 的版本号一致
+SCHEMA_VERSION = 4
 
 # fts 表里 aliases 的存储分隔符，查询层按它还原成列表做精确匹配
 ALIAS_SEP = "\n"
@@ -83,11 +88,21 @@ class SearchIndex:
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = 'notes'"
-        ).fetchone()
-        if not exists:
-            conn.executescript(_SCHEMA_SQL)
+        """表结构版本不符时丢弃并重建 notes / notes_fts（数据由启动时的全量重建补回）。
+
+        ingest_log 不丢：它不是从笔记文件派生的，丢了就失去重复录入的检测。
+        """
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        tables = {
+            name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        if version == SCHEMA_VERSION and {"notes", "notes_fts", "ingest_log"} <= tables:
+            return
+        conn.executescript("DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS notes_fts;")
+        conn.executescript(_NOTES_SQL + _FTS_SQL)
+        if "ingest_log" not in tables:
+            conn.executescript(_INGEST_LOG_SQL)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ---------- 写入 ----------
 
@@ -104,20 +119,19 @@ class SearchIndex:
         conn.execute("DELETE FROM notes WHERE path = ?", (path,))
         conn.execute(
             "INSERT INTO notes"
-            " (path, id, title, category, suggested_domain, tags, aliases, summary, status,"
-            "  verified, confidence, content_hash, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (path, id, title, category, category_locked, tags, aliases, summary, status,"
+            "  confidence, content_hash, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 fm.id,
                 fm.title,
                 fm.category,
-                fm.suggested_domain,
+                int(fm.category_locked),
                 json.dumps(fm.tags, ensure_ascii=False),
                 json.dumps(fm.aliases, ensure_ascii=False),
                 fm.summary,
                 fm.status,
-                int(fm.verified),
                 fm.confidence,
                 content_hash(note),
                 fm.updated.isoformat(),

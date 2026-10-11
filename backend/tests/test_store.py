@@ -32,21 +32,91 @@ def test_duplicate_title_gets_numbered_suffix(store: VaultStore) -> None:
     assert store.read_note(rel2).body.strip() == "第二篇的内容"
 
 
-def test_invalid_category_goes_to_inbox(store: VaultStore, taxonomy) -> None:
-    # 调用方流程：先判定，再决定落 inbox
-    assert not taxonomy.is_valid_category("no-such/leaf")
-    assert not taxonomy.is_valid_category("ai-engineering")  # parent 单独出现算非法
+def test_inbox_notes_also_land_in_notes_dir(store: VaultStore) -> None:
+    """v4：状态只写在 frontmatter 里，待整理的笔记也在 notes/，以后被归类时文件不用移动。"""
+    rel = store.create_note(make_note(category=None, status="inbox", confidence=0.0))
 
-    note = make_note(
-        category=None, status="inbox", confidence=0.3, suggested_domain="检索技术"
-    )
-    rel = store.create_note(note)
-
-    assert rel.parts[0] == "inbox"
+    assert rel == Path("notes/RAG 检索增强生成.md")
     read_back = store.read_note(rel)
-    assert read_back.frontmatter.status == "inbox"
-    assert read_back.frontmatter.category is None
-    assert read_back.frontmatter.suggested_domain == "检索技术"
+    assert (read_back.frontmatter.status, read_back.frontmatter.category) == ("inbox", None)
+    assert list(store.inbox_dir.glob("*.md")) == []
+
+
+def test_filename_is_unique_across_notes_and_inbox(store: VaultStore) -> None:
+    """双链只写文件名：旧版本留在 inbox/ 里的同名文件也要避开。"""
+    (store.inbox_dir / "RAG 检索增强生成.md").write_text("旧版本留下的笔记", encoding="utf-8")
+
+    rel = store.create_note(make_note())
+
+    assert rel == Path("notes/RAG 检索增强生成 (2).md")
+
+
+def test_create_note_never_starts_locked(store: VaultStore) -> None:
+    note = make_note(category_locked=True)
+    rel = store.create_note(note)
+    assert store.read_note(rel).frontmatter.category_locked is False
+    assert note.frontmatter.category_locked is False
+
+
+LEGACY_NOTE = (
+    "---\n"
+    "id: 01M4N9MMZ8ZM4FXWMY3GARG867\n"
+    "title: 旧版本的笔记\n"
+    "category: null\n"
+    "suggested_domain: 人工智能\n"
+    "tags: []\n"
+    "aliases: [旧笔记]\n"
+    "summary: v3 写出来的笔记，带着两个已经删除的字段。\n"
+    "status: inbox\n"
+    "verified: false\n"
+    "confidence: 0.0\n"
+    "created: '2026-10-11T12:07:21.702215+08:00'\n"
+    "updated: '2026-10-11T12:07:21.702215+08:00'\n"
+    "source: {kind: screenshot, ref: assets/2026-10-11-120721.png}\n"
+    "---\n"
+    "\n"
+    "## 一句话\n"
+    "正文一个字都不能动。\n"
+)
+
+
+def test_legacy_fields_are_ignored_on_read_and_dropped_on_rewrite(store: VaultStore) -> None:
+    """SCHEMA 2.2「旧字段的兼容」：读取时忽略不报错，下次改写时自然消失。"""
+    target = store.inbox_dir / "旧版本的笔记.md"
+    target.write_text(LEGACY_NOTE, encoding="utf-8")
+    rel = Path("inbox/旧版本的笔记.md")
+
+    note = store.read_note(rel)
+    assert (note.frontmatter.category, note.frontmatter.category_locked) == (None, False)
+    assert target.read_text(encoding="utf-8") == LEGACY_NOTE  # 读取没有副作用
+
+    updated = store.update_frontmatter(
+        rel, category="人工智能/模型训练", status="active", confidence=0.9
+    )
+
+    text = target.read_text(encoding="utf-8")
+    assert "suggested_domain" not in text and "verified" not in text
+    assert "category: 人工智能/模型训练" in text
+    # 文件原地改写：没有搬到 notes/，id、标题、正文、时间都不变
+    assert updated.path == rel and not (store.notes_dir / "旧版本的笔记.md").exists()
+    read_back = store.read_note(rel)
+    assert read_back.frontmatter.id == "01M4N9MMZ8ZM4FXWMY3GARG867"
+    assert read_back.frontmatter.updated == note.frontmatter.updated
+    assert read_back.body.strip() == "## 一句话\n正文一个字都不能动。"
+
+
+def test_update_frontmatter_validates(store: VaultStore) -> None:
+    rel = store.create_note(make_note())
+    before = (store.root / rel).read_text(encoding="utf-8")
+
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        store.update_frontmatter(rel, category="只有大块")
+    with pytest.raises(ValidationError):
+        store.update_frontmatter(rel, category=None, status="active")
+    assert (store.root / rel).read_text(encoding="utf-8") == before
 
 
 def test_filename_sanitized(store: VaultStore) -> None:
@@ -63,29 +133,6 @@ def test_filename_sanitized(store: VaultStore) -> None:
     assert store.read_note(rel).frontmatter.title == '问: RAG/FC 有何区别? 何时用*哪个?'
 
 
-def test_create_note_forces_verified_false(store: VaultStore) -> None:
-    """不变量 11：任何来源创建时 verified 一律 false，传入 True 也被忽略。"""
-    for kind in ("screenshot", "text", "generated"):
-        note = make_note(title=f"来源为 {kind} 的笔记", verified=True, kind=kind)
-        rel = store.create_note(note)
-        assert store.read_note(rel).frontmatter.verified is False
-        # 内存对象与落盘内容一致
-        assert note.frontmatter.verified is False
-
-
-def test_manually_verified_reads_back_true(store: VaultStore) -> None:
-    rel = store.create_note(make_note())
-    assert store.read_note(rel).frontmatter.verified is False
-
-    # 模拟人工编辑文件把 verified 翻为 true（这是唯一合法的翻转途径）
-    target = store.root / rel
-    text = target.read_text(encoding="utf-8")
-    assert "verified: false" in text
-    target.write_text(text.replace("verified: false", "verified: true"), encoding="utf-8")
-
-    assert store.read_note(rel).frontmatter.verified is True
-
-
 def test_create_note_generates_id(store: VaultStore) -> None:
     note = make_note()
     assert note.frontmatter.id is None  # 模型层不生成，构造出来就是 None
@@ -100,7 +147,7 @@ def test_create_note_generates_id(store: VaultStore) -> None:
 
 
 def test_create_note_ignores_caller_supplied_id(store: VaultStore) -> None:
-    """id 和 verified 一样是写入层的创建时语义，调用方传什么都不算数。"""
+    """id 是写入层的创建时语义，调用方传什么都不算数。"""
     note = make_note()
     note.frontmatter = note.frontmatter.model_copy(update={"id": "调用方伪造的 id"})
 
@@ -121,7 +168,7 @@ def test_read_note_never_backfills_id(store: VaultStore) -> None:
     target.write_text(
         "---\n"
         "title: Obsidian 手建的笔记\n"
-        "category: ai-engineering/rag\n"
+        "category: AI工程/RAG\n"
         "suggested_domain: null\n"
         "tags: []\n"
         "aliases: []\n"

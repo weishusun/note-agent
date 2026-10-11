@@ -21,7 +21,6 @@ def client(vault_root: Path, store: VaultStore, index: SearchIndex) -> TestClien
         category=None,
         status="inbox",
         confidence=0.4,
-        suggested_domain="检索技术",
         aliases=[],
     )
     store.create_note(inbox_note)
@@ -33,8 +32,8 @@ def test_get_taxonomy(client: TestClient) -> None:
     resp = client.get("/api/taxonomy")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["version"] == 1
-    assert "rag" in data["categories"]["ai-engineering"]["children"]
+    assert data["version"] == 2
+    assert data["categories"]["AI工程"]["children"]["RAG"] == {"locked": False}
     assert "向量检索" in data["tags"]
 
 
@@ -50,20 +49,19 @@ def test_get_search(client: TestClient) -> None:
         "path",
         "title",
         "category",
-        "suggested_domain",
+        "category_locked",
         "tags",
         "summary",
         "status",
-        "verified",
         "updated",
         "confidence",
     }
 
     # matched_category 是对 q 的查询理解，不是 category 参数的回显
-    resp = client.get("/api/search", params={"q": "", "category": "ai-engineering/rag"})
+    resp = client.get("/api/search", params={"q": "", "category": "AI工程/RAG"})
     assert resp.json()["matched_category"] is None
     resp = client.get("/api/search", params={"q": "rag"})
-    assert resp.json()["matched_category"] == "ai-engineering/rag"
+    assert resp.json()["matched_category"] == "AI工程/RAG"
 
 
 def test_search_include_inbox_param(client: TestClient) -> None:
@@ -85,7 +83,7 @@ def test_get_inbox_returns_only_inbox_notes(client: TestClient) -> None:
     data = resp.json()
     assert [r["title"] for r in data] == ["检索增强踩坑记录"]
     assert data[0]["status"] == "inbox"
-    assert data[0]["suggested_domain"] == "检索技术"
+    assert data[0]["category"] is None
     # active 笔记（RAG 检索增强生成）不得出现
     assert all(r["status"] == "inbox" for r in data)
 
@@ -127,7 +125,7 @@ def test_list_notes_orders_by_updated_desc(
 
 def test_reindex_follows_the_disk(client: TestClient, vault_root: Path) -> None:
     """不变量 13：用户在 Obsidian 里删了一条、手写了一条坏的、又加了一条好的。"""
-    (vault_root / "inbox/检索增强踩坑记录.md").unlink()
+    (vault_root / "notes/检索增强踩坑记录.md").unlink()
     (vault_root / "notes/手写的坏笔记.md").write_text("没有 frontmatter 的纯文本\n", encoding="utf-8")
     good = (vault_root / "notes/RAG 检索增强生成.md").read_text(encoding="utf-8")
     (vault_root / "notes/手动复制的笔记.md").write_text(

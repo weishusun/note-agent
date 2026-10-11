@@ -4,25 +4,27 @@ export interface NoteRef {
   id: string | null
   path: string
   title: string
+  // 「大块/小块」。待整理的笔记这里是模型的猜测，也可能是 null
   category: string | null
-  suggested_domain: string | null
+  category_locked: boolean
   tags: string[]
   summary: string
   status: "active" | "inbox" | "archived"
-  verified: boolean
   updated: string
   confidence: number
 }
 
+// 录入任务依次经过的四个阶段（重新归类的任务阶段是「归类」，不在此列）
 export const STAGES = ["解析", "拆分", "分类", "写入"] as const
 
 export interface JobState {
   status: "pending" | "running" | "done" | "failed"
-  stage: (typeof STAGES)[number]
+  stage: (typeof STAGES)[number] | "归类"
   created: NoteRef[]
   inbox: NoteRef[]
   duplicate: boolean
   error: string | null
+  progress: { done: number; total: number } | null
 }
 
 export interface AskResult {
@@ -34,15 +36,36 @@ export interface AskResult {
 
 export interface NoteDetail {
   frontmatter: {
+    id: string | null
     title: string
     category: string | null
-    suggested_domain: string | null
+    category_locked: boolean
     aliases: string[]
-    verified: boolean
+    status: NoteRef["status"]
     updated: string
     source: { kind: string; ref: string }
   }
   body: string
+}
+
+export interface TreeChild {
+  name: string
+  path: string
+  locked: boolean
+  count: number
+}
+
+export interface TreeParent {
+  name: string
+  locked: boolean
+  count: number
+  children: TreeChild[]
+}
+
+export interface Tree {
+  total: number
+  inbox: number
+  categories: TreeParent[]
 }
 
 export interface SettingsView {
@@ -73,6 +96,11 @@ export interface ProbeResult {
 export interface NoteTarget {
   title: string
   paths: string[]
+}
+
+// 「人工智能/模型训练」在界面上显示成「人工智能 › 模型训练」
+export function categoryLabel(category: string): string {
+  return category.replace("/", " › ")
 }
 
 export function linkTarget(stem: string): NoteTarget {
@@ -120,20 +148,42 @@ function send<T>(method: "POST" | "PUT", url: string, body: unknown): Promise<T>
 
 const post = <T,>(url: string, body: unknown) => send<T>("POST", url, body)
 
+function query(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "") search.set(key, String(value))
+  }
+  return search.toString()
+}
+
 export const api = {
   ingest: (input: IngestInput) => post<{ job_id: string }>("/api/ingest", input),
   job: (jobId: string) => request<JobState>(`/api/jobs/${encodeURIComponent(jobId)}`),
   ask: (question: string) => post<AskResult>("/api/ask", { question }),
-  notes: (limit = 100) => request<NoteRef[]>(`/api/notes?limit=${limit}`),
+
+  notes: (filter: { category?: string; status?: "inbox" } = {}) =>
+    request<NoteRef[]>(`/api/notes?${query({ ...filter, limit: 200 })}`),
   search: (q: string) =>
     request<{ results: NoteRef[] }>(
-      `/api/search?include_inbox=true&limit=50&q=${encodeURIComponent(q)}`,
+      `/api/search?${query({ q, include_inbox: "true", limit: 50 })}`,
     ).then((data) => data.results),
+  note: (path: string) =>
+    request<NoteDetail>(`/api/notes/${path.split("/").map(encodeURIComponent).join("/")}`),
   reindex: () => post<{ indexed: number }>("/api/reindex", {}),
+
+  // 分类：路径里有中文和「/」，一律放在请求体或查询参数里
+  tree: () => request<Tree>("/api/tree"),
+  moveNote: (id: string, category: string) =>
+    send<NoteRef>("PUT", `/api/notes/${encodeURIComponent(id)}/category`, { category }),
+  createCategory: (path: string) => post<Tree>("/api/categories", { path }),
+  renameCategory: (path: string, name: string) =>
+    send<Tree>("PUT", "/api/categories", { path, name }),
+  deleteCategory: (path: string) =>
+    request<Tree>(`/api/categories?${query({ path })}`, { method: "DELETE" }),
+  reclassify: (scope: "unsorted" | "all") => post<{ job_id: string }>("/api/reclassify", { scope }),
+
   settings: () => request<SettingsView>("/api/settings"),
   saveSettings: (update: SettingsUpdate) => send<SettingsView>("PUT", "/api/settings", update),
   testSettings: () =>
     post<{ text: ProbeResult; vision: ProbeResult }>("/api/settings/test", {}),
-  note: (path: string) =>
-    request<NoteDetail>(`/api/notes/${path.split("/").map(encodeURIComponent).join("/")}`),
 }

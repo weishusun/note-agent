@@ -18,14 +18,10 @@ import sys
 import time
 
 from app import config
+from app.extract.classifier import NoteBrief, classify_notes
 from app.extract.client import bind_structured, get_extract_model
-from app.extract.extractor import (
-    _DraftBatch,
-    _extract_messages,
-    _image_mime,
-    classify_batch,
-)
-from app.vault.taxonomy import TaxonomyManager
+from app.extract.extractor import _DraftBatch, _extract_messages, _image_mime
+from app.vault.models import Tree
 
 
 def _mask(key: str | None) -> str:
@@ -150,20 +146,18 @@ def main() -> None:
         print(f"  --- draft {i} ---")
         print(_pretty(draft))
 
-    # [5] classify —— 走 classify_batch:单次录入内逐条累积 known_domains,
-    #     后一条能看到前一条定的领域名,避免同一张图分出「AI工程」「人工智能」两个值。
-    taxonomy = TaxonomyManager(config.default_vault_root() / "taxonomy.yaml")
-    leaves = taxonomy.leaf_categories()
-    tags = taxonomy.load().tags
-    print(f"\n[5] classify_batch 解析结果(叶子数={len(leaves)}, 标签数={len(tags)})")
-    print("    (batch 路径不单独回传 raw/usage;解析失败时全文会随 ExtractError 抛出。")
-    print("     要逐条看原始响应,单独对某条 draft 调 classify)")
-    classifications = classify_batch(drafts, leaves, tags, [])
+    # [5] 归类 —— 一次调用给这份输入的所有草稿定「大块/小块」。这里用空分类树,
+    #     看的是模型在冷启动时会怎么起名;解析失败时原因随 ExtractError 抛出。
+    print("\n[5] classify_notes 结果(空分类树)")
+    classifications = classify_notes(
+        [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in drafts],
+        Tree(total=0, inbox=0, categories=[]),
+    )
     for i, cr in enumerate(classifications, 1):
         print(f"  --- draft {i} 分类 ---")
         print(_pretty(cr))
 
-    # [6] token 用量(仅 extract;classify 走 batch 未单独回传 usage)
+    # [6] token 用量(仅 extract;归类未单独回传 usage)
     print("\n[6] token 用量(extract)")
     print(f"  input={usage['input_tokens']}  output={usage['output_tokens']}"
           f"  total={usage['input_tokens'] + usage['output_tokens']}")

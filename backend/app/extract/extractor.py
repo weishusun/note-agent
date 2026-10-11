@@ -1,16 +1,11 @@
-"""提取层的两个独立函数:extract_drafts(看懂+拆分)与 classify(分类)。
+"""提取:看懂输入(截图或短文本)并拆成草稿。归类在 app/extract/classifier.py。
 
-刻意不合并:提取用视觉模型、只忠实归纳;分类用文本模型、注入封闭枚举。
+刻意不合并:提取用视觉模型、忠实归纳;归类用文本模型、对着分类树选。
 两段的失败模式和重试语义也不同,合在一起会互相污染。
 
 重试策略:
-- 结构化输出解析失败 → 带着错误原因重试一次,仍失败抛 ExtractError(对两个函数都适用)。
-- extract 的字数/条数超限**不算失败**:解析时不校验,事后由 _fit_drafts 压缩或截断。
-- classify 额外的语义重试:模型给的 category 不在叶子表里、或 category 为 null 时
-  suggested_domain 不是合法领域名(缺失 / 字符串 "null" / 长度不在 2-8 字)→ 再问一次。
-  非法 category 最终规整成 null;但 suggested_domain 重试后仍缺失则**抛 ExtractError**,
-  不静默放行——这个字段缺了整个冷启动就废了。
-- 字符串 "null"/"none"/"" 一律先归一为 None(有些模型会把 JSON null 写成字符串)。
+- 结构化输出解析失败 → 带着错误原因重试一次,仍失败抛 ExtractError。
+- 字数/条数超限**不算失败**:解析时不校验,事后由 _fit_drafts 压缩或截断。
 
 所有对模型的调用都用 with_structured_output(..., include_raw=True),
 raw 那一路用来读 usage_metadata(token 消耗),parsed 那一路是校验后的对象。
@@ -37,7 +32,6 @@ from app.extract.models import (
     RELATED_MAX,
     SUMMARY_MAX,
     TITLE_MAX,
-    ClassifyResult,
     NoteDraft,
 )
 from pydantic import BaseModel, Field
@@ -46,14 +40,8 @@ logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-# 有些模型会把 JSON null 误写成字符串;统一按缺失处理
-_NULL_STRINGS = {"null", "none", "nil", ""}
-# suggested_domain 的合法长度(汉字数)
-_DOMAIN_MIN, _DOMAIN_MAX = 2, 8
-
-
 class ExtractError(RuntimeError):
-    """提取/分类过程无法产出合法结构化结果(含重试后仍失败)。"""
+    """模型无法产出合法的结构化结果(含重试后仍失败)。提取和归类共用。"""
 
 
 class _WireDraft(BaseModel):
@@ -80,17 +68,8 @@ class _Compressed(BaseModel):
     items: list[str]
 
 
-class _DomainResult(BaseModel):
-    """分类表为空时 classify 的结构化输出:只要领域名,且必填。"""
-
-    suggested_domain: str
-    tags: list[str] = Field(default_factory=list)
-    reason: str = ""
-
-
 # ---------- 公开函数 ----------
-# 都返回 (结果, usage):usage 形如 {"input_tokens", "output_tokens", "model"},
-# 供编排层 / evals 统计 token 消耗。
+# 返回 (结果, usage):usage 形如 {"input_tokens", "output_tokens", "model"}。
 
 
 def extract_drafts(
@@ -197,152 +176,6 @@ def _warn_draft_quality(draft: NoteDraft) -> None:
                 len(alias),
                 alias,
             )
-
-
-def classify(
-    draft: NoteDraft,
-    leaves: list[str],
-    tags: list[str],
-    known_domains: list[tuple[str, int]],
-    override: str | None = None,
-) -> tuple[ClassifyResult, dict]:
-    """给单条草稿分类。leaves 为空是正常情况,直接走 suggested_domain 路径。"""
-    model = get_classify_model(override)
-    # 分类表为空时换成 suggested_domain 必填的 schema：用 ClassifyResult 时它是可选字段，
-    # 模型会直接省略它（真实接口上实测出现过），整次录入就失败了
-    runnable = bind_json(model, ClassifyResult if leaves else _DomainResult)
-    messages = _classify_messages(draft, leaves, tags, known_domains)
-    model_id = _model_id(model)
-
-    parsed, usage = _invoke_structured(runnable, messages, model_id)
-    raw = _normalize(_as_classify_result(parsed))
-    hint = _retry_hint(raw, leaves)
-    if hint is not None:
-        parsed, again = _invoke_structured(
-            runnable, [*messages, HumanMessage(content=hint)], model_id
-        )
-        raw = _normalize(_as_classify_result(parsed))
-        usage = _add_usage(usage, again)
-
-    # 降级到 suggested_domain 路径却拿不到合法领域名 → 抛,不静默放行
-    if _effective_category(raw, leaves) is None and not _valid_domain(raw.suggested_domain):
-        raise ExtractError(
-            "分类降级为 suggested_domain,但模型重试后仍未给出合法领域名"
-            f"(需 {_DOMAIN_MIN}-{_DOMAIN_MAX} 字)。模型原始返回: {raw.model_dump()}"
-        )
-    return _finalize(raw, leaves, tags), usage
-
-
-def classify_batch(
-    drafts: list[NoteDraft],
-    leaves: list[str],
-    tags: list[str],
-    known_domains: list[tuple[str, int]],
-) -> list[ClassifyResult]:
-    """对**同一次录入**产出的一批草稿逐条分类,每条处理完就把它的 suggested_domain
-    追加进 known_domains 再处理下一条。返回顺序与 drafts 一致。
-
-    否则同一张图出来的四条会各自新造近义领域名(如「AI工程」vs「人工智能」):
-    第一条定的领域后三条看不到,就分叉了。逐条累积让后来的草稿优先复用已定的领域名。
-    """
-    running: dict[str, int] = dict(known_domains)
-    results: list[ClassifyResult] = []
-    for draft in drafts:
-        snapshot = sorted(running.items(), key=lambda kv: (-kv[1], kv[0]))
-        result, _usage = classify(draft, leaves, tags, snapshot)
-        results.append(result)
-        if result.suggested_domain:
-            running[result.suggested_domain] = running.get(result.suggested_domain, 0) + 1
-    return results
-
-
-# ---------- 分类后置校验 ----------
-
-
-def _null_to_none(value: str | None) -> str | None:
-    """把字符串 "null"/"none"/"" 等归一为 None(模型偶尔把 JSON null 写成字符串)。"""
-    if value is None:
-        return None
-    return None if value.strip().lower() in _NULL_STRINGS else value
-
-
-def _normalize(raw: ClassifyResult) -> ClassifyResult:
-    return raw.model_copy(
-        update={
-            "category": _null_to_none(raw.category),
-            "suggested_domain": _null_to_none(raw.suggested_domain),
-        }
-    )
-
-
-def _valid_domain(sd: str | None) -> bool:
-    return sd is not None and _DOMAIN_MIN <= len(sd) <= _DOMAIN_MAX
-
-
-def _effective_category(raw: ClassifyResult, leaves: list[str]) -> str | None:
-    """只认真正落在叶子表里的 category,其余(含叶子表为空)一律 None。"""
-    if raw.category and leaves and raw.category in leaves:
-        return raw.category
-    return None
-
-
-def _retry_hint(raw: ClassifyResult, leaves: list[str]) -> str | None:
-    """需要语义重试时返回要追加给模型的纠正说明,否则 None。raw 已归一化。
-
-    重试必须带上「错在哪」:温度为 0,原样重发大概率得到同样的错误输出。
-    """
-    eff = _effective_category(raw, leaves)
-    if raw.category is not None and eff is None:
-        return (
-            f"你上一次给的 category「{raw.category}」不在可用的分类叶子里。"
-            "只能原样选用列表中的某一个;都不合适就把 category 设为 null 并给出 suggested_domain。"
-        )
-    if eff is None and not _valid_domain(raw.suggested_domain):
-        return (
-            f"你上一次给的 suggested_domain 是 {raw.suggested_domain!r},不合格。"
-            f"它必须是 {_DOMAIN_MIN} 到 {_DOMAIN_MAX} 个字的学科或技术领域名,请重新给出。"
-        )
-    return None
-
-
-def _as_classify_result(parsed: BaseModel) -> ClassifyResult:
-    if isinstance(parsed, ClassifyResult):
-        return parsed
-    return ClassifyResult(
-        category=None,
-        suggested_domain=parsed.suggested_domain,  # type: ignore[attr-defined]
-        tags=parsed.tags,  # type: ignore[attr-defined]
-        reason=parsed.reason,  # type: ignore[attr-defined]
-    )
-
-
-def _finalize(raw: ClassifyResult, leaves: list[str], tags: list[str]) -> ClassifyResult:
-    """把模型输出规整成合法结果:非法分类降级为 suggested_domain 路径,
-    词表外标签直接丢弃(最多 6 个),分类路径下 suggested_domain 强制为空、
-    suggested_domain 路径下 confidence 强制为 0。"""
-    eff = _effective_category(raw, leaves)
-    allowed = set(tags)
-    kept: list[str] = []
-    for t in raw.tags:
-        if t in allowed and t not in kept:
-            kept.append(t)
-    kept = kept[:6]
-
-    if eff is None:
-        return ClassifyResult(
-            category=None,
-            suggested_domain=raw.suggested_domain,
-            tags=kept,
-            confidence=0.0,
-            reason=raw.reason,
-        )
-    return ClassifyResult(
-        category=eff,
-        suggested_domain=None,
-        tags=kept,
-        confidence=raw.confidence,
-        reason=raw.reason,
-    )
 
 
 # ---------- 结构化调用 + 重试 + usage ----------
@@ -454,46 +287,6 @@ def _extract_messages(image: bytes | None, text: str | None) -> list:
         url = f"data:{_image_mime(image)};base64,{b64}"
         parts.append({"type": "image_url", "image_url": {"url": url}})
     return [SystemMessage(content=system), HumanMessage(content=parts)]
-
-
-def _classify_messages(
-    draft: NoteDraft,
-    leaves: list[str],
-    tags: list[str],
-    known_domains: list[tuple[str, int]],
-) -> list:
-    """按 leaves 是否为空择一注入两套任务描述:
-    - 非空:选分类(classify_zh.md)
-    - 为空:完全不提分类,只给学科领域标签(classify_domain_zh.md)。
-      混着提「分类」会让模型按选分类思考、然后干脆不给 suggested_domain。
-    """
-    common = dict(
-        title=draft.title,
-        summary=draft.summary,
-        points="\n".join(f"- {p}" for p in draft.points),
-        related="、".join(draft.related) or "(无)",
-        tags=_render_enum(tags, "(当前没有可用标签)"),
-        known_domains=_render_domains(known_domains),
-    )
-    if leaves:
-        body = _load_prompt("classify_zh.md").format(
-            leaves=_render_enum(leaves, ""), **common
-        )
-    else:
-        body = _load_prompt("classify_domain_zh.md").format(**common)
-    return [HumanMessage(content=body)]
-
-
-def _render_enum(items: list[str], empty_hint: str) -> str:
-    if not items:
-        return empty_hint
-    return "\n".join(f"- {it}" for it in items)
-
-
-def _render_domains(known_domains: list[tuple[str, int]]) -> str:
-    if not known_domains:
-        return "(暂无已知领域,如需新造请给一个简洁的领域名)"
-    return "\n".join(f"- {name}({count} 条)" for name, count in known_domains)
 
 
 def _image_mime(data: bytes) -> str:

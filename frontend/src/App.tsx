@@ -20,6 +20,9 @@ type TabId = (typeof TABS)[number]["id"]
 function App() {
   const [tab, setTab] = useState<TabId>("ingest")
   const [openNote, setOpenNote] = useState<NoteTarget | null>(null)
+  // 笔记的分类在弹窗里被改动的次数：笔记页据此重新加载目录树和列表
+  const [notesVersion, setNotesVersion] = useState(0)
+  const noteChanged = useCallback(() => setNotesVersion((v) => v + 1), [])
   const openRef = useCallback(
     (note: NoteRef) => setOpenNote({ title: note.title, paths: [note.path] }),
     [],
@@ -28,7 +31,13 @@ function App() {
   const closeNote = useCallback(() => setOpenNote(null), [])
 
   return (
-    <div className="mx-auto flex min-h-svh max-w-2xl flex-col gap-6 px-4 py-8">
+    <div
+      className={cn(
+        "mx-auto flex min-h-svh flex-col gap-6 px-4 py-8",
+        // 笔记页左边有目录树，需要更宽
+        tab === "notes" ? "max-w-5xl" : "max-w-2xl",
+      )}
+    >
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">note-agent</h1>
         <nav role="tablist" className="flex gap-1 rounded-lg bg-muted p-1">
@@ -59,14 +68,21 @@ function App() {
           <AskPanel onOpenNote={openRef} />
         </div>
         <div hidden={tab !== "notes"}>
-          <NotesPanel active={tab === "notes"} onOpenNote={openRef} />
+          <NotesPanel active={tab === "notes"} version={notesVersion} onOpenNote={openRef} />
         </div>
         <div hidden={tab !== "settings"}>
           <SettingsPanel active={tab === "settings"} />
         </div>
       </main>
 
-      {openNote && <NoteDialog target={openNote} onOpenLink={openLink} onClose={closeNote} />}
+      {openNote && (
+        <NoteDialog
+          target={openNote}
+          onOpenLink={openLink}
+          onChanged={noteChanged}
+          onClose={closeNote}
+        />
+      )}
     </div>
   )
 }

@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.extract import classifier
+from app.extract.classifier import Placement
 from app.extract.extractor import ExtractError
-from app.extract.models import ClassifyResult, NoteDraft
+from app.extract.models import NoteDraft
 from app.ingest import pipeline
 from app.main import create_app
 from app.vault import git
@@ -30,17 +32,21 @@ DRAFTS = [
         related=["RAG"],
     ),
 ]
-RESULTS = [
-    ClassifyResult(category="ai-engineering/rag", tags=["向量检索"], confidence=0.9),
-    ClassifyResult(category=None, suggested_domain="模型训练", confidence=0.0),
+# 第一条明确归进已有的小块（模型写的大小写与库里不同）；
+# 第二条模型新建了一个小块，但把握不足 → 进待整理
+PLACEMENTS = [
+    Placement(parent="ai工程", child="rag", confidence=0.9),
+    Placement(parent="AI工程", child="模型微调", confidence=0.4),
 ]
 
 
 class Stubs:
     def __init__(self) -> None:
         self.extract_calls: list[tuple[bytes | None, str | None]] = []
+        self.classify_calls: list = []
         self.commits: list[str] = []
         self.extract_error: Exception | None = None
+        self.classify_error: Exception | None = None
         self.commit_error: Exception | None = None
 
     def extract(self, image, text, override=None):
@@ -49,8 +55,11 @@ class Stubs:
             raise self.extract_error
         return DRAFTS, {}
 
-    def classify_batch(self, drafts, leaves, tags, known_domains):
-        return RESULTS
+    def classify_notes(self, briefs, tree):
+        self.classify_calls.append((briefs, tree))
+        if self.classify_error is not None:
+            raise self.classify_error
+        return PLACEMENTS[: len(briefs)]
 
     def commit(self, vault_root, message):
         if self.commit_error is not None:
@@ -63,7 +72,7 @@ class Stubs:
 def stubs(monkeypatch: pytest.MonkeyPatch) -> Stubs:
     s = Stubs()
     monkeypatch.setattr(pipeline, "extract_drafts", s.extract)
-    monkeypatch.setattr(pipeline, "classify_batch", s.classify_batch)
+    monkeypatch.setattr(classifier, "classify_notes", s.classify_notes)
     monkeypatch.setattr(git, "commit", s.commit)
     return s
 
@@ -86,22 +95,44 @@ def test_text_ingest_writes_notes_and_indexes(
 ) -> None:
     job = _ingest(client, kind="text", text="RAG 与微调的对比")
 
-    assert set(job) == {"status", "stage", "created", "inbox", "duplicate", "error"}
-    assert (job["status"], job["stage"], job["duplicate"], job["error"]) == (
+    assert set(job) == {"status", "stage", "created", "inbox", "duplicate", "error", "progress"}
+    assert (job["status"], job["stage"], job["duplicate"], job["error"], job["progress"]) == (
         "done",
         "写入",
         False,
         None,
+        None,
     )
     assert [r["path"] for r in job["created"]] == ["notes/RAG.md"]
-    assert [r["path"] for r in job["inbox"]] == ["inbox/Fine-tuning.md"]
+    assert [r["path"] for r in job["inbox"]] == ["notes/Fine-tuning.md"]  # 待整理的也在 notes/
     assert all(len(r["id"]) == 26 for r in job["created"] + job["inbox"])
+
+    # 自动归类：沿用库里已有的写法；把握不足的进待整理但保留模型的猜测
+    created, pending = job["created"][0], job["inbox"][0]
+    assert (created["category"], created["status"], created["category_locked"]) == (
+        "AI工程/RAG",
+        "active",
+        False,
+    )
+    assert (pending["category"], pending["status"], pending["confidence"]) == (
+        "AI工程/模型微调",
+        "inbox",
+        0.4,
+    )
+    # 一份输入的所有草稿在一次调用里一起归类，模型能看到当前的分类树
+    (briefs, tree), = stubs.classify_calls
+    assert [b.title for b in briefs] == ["RAG", "Fine-tuning"]
+    assert [p.name for p in tree.categories] == ["AI工程", "计算机基础"]
+    # 模型新建的小块立即登记，不需要确认，也不锁定
+    taxonomy = client.get("/api/taxonomy").json()
+    assert taxonomy["categories"]["AI工程"]["children"]["模型微调"] == {"locked": False}
 
     # 同批草稿互相建了双链，且文件真实存在
     rag = (vault_root / "notes/RAG.md").read_text(encoding="utf-8")
     assert "- [[Fine-tuning]]" in rag
     assert "## 原始输入\n> RAG 与微调的对比" in rag
-    assert (vault_root / "inbox/Fine-tuning.md").is_file()
+    assert (vault_root / "notes/Fine-tuning.md").is_file()
+    assert list((vault_root / "inbox").glob("*.md")) == []
 
     # 立刻可检索
     found = client.get("/api/search", params={"q": "RAG"}).json()["results"]
@@ -137,7 +168,7 @@ def test_duplicate_returns_previous_result_and_force_reprocesses(
     assert again["created"] == first["created"]
     assert again["inbox"] == first["inbox"]
     assert len(stubs.extract_calls) == 1
-    assert len(list((vault_root / "notes").glob("*.md"))) == 1
+    assert len(list((vault_root / "notes").glob("*.md"))) == 2  # 没有重复生成
 
     forced = _ingest(client, kind="text", text="同一段输入", force=True)
     assert forced["duplicate"] is False
@@ -222,3 +253,18 @@ def test_invalid_requests_rejected(
 
 def test_unknown_job_is_404(client: TestClient) -> None:
     assert client.get("/api/jobs/不存在").status_code == 404
+
+
+def test_classification_failure_does_not_fail_ingest(
+    client: TestClient, vault_root: Path, stubs: Stubs
+) -> None:
+    """SCHEMA 3.2：分类失败不得让录入失败——笔记照常保存，进待整理。"""
+    stubs.classify_error = RuntimeError("429 限流")
+    job = _ingest(client, kind="text", text="分类这一步会失败")
+
+    assert job["status"] == "done" and job["created"] == []
+    assert [(r["title"], r["category"], r["confidence"]) for r in job["inbox"]] == [
+        ("RAG", None, 0.0),
+        ("Fine-tuning", None, 0.0),
+    ]
+    assert (vault_root / "notes/RAG.md").is_file()

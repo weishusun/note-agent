@@ -1,16 +1,16 @@
 """提取层评测。
 
-    uv run python -m evals.run [--extract-model X] [--classify-model Y] [--limit N]
+    uv run python -m evals.run [--extract-model X] [--limit N]
 
 每个样本 = 一张图(或一个 .txt) + 同名 .yaml。yaml 字段:
     expected_domain_group: 量子力学          # 一致性检验的分组标签
     expected_title_keywords: [角动量, 对易]
     expected_note_count: [1, 3]             # 合理条数区间 [下限, 上限]
-    expected_category: physics/quantum-mechanics   # 可选,taxonomy 非空时才有意义
+    expected_category: 物理/量子力学         # 可选,期望的「大块/小块」
 
-**一致性指标模拟真实累积过程**:按 fixture 顺序逐个处理,每处理完一个就把它产出的
-suggested_domain 加进 known_domains 再处理下一个——测的是冷启动时领域名会不会收敛。
-一次性把所有已知领域喂进去是测不出来的。
+**一致性指标模拟真实累积过程**:从空分类树开始,按 fixture 顺序逐个处理,每处理完一个就把它
+产出的分类累积进分类树再处理下一个——测的是冷启动时大块的名字会不会收敛。
+分类模型取自当前设置(.env 或设置页),不在这里覆盖。
 
 会调用真实 GLM API,消耗 token。结果写 evals/results/{时间戳}_{模型名}.json。
 """
@@ -25,16 +25,25 @@ from pathlib import Path
 
 import yaml
 
-from app import config
-from app.config import default_vault_root
-from app.extract.extractor import classify, extract_drafts
-from app.extract.models import ClassifyResult, ExtractResult
-from app.vault.taxonomy import TaxonomyManager
+from app import settings
+from app.extract.classifier import NoteBrief, Placement, classify_notes
+from app.extract.extractor import extract_drafts
+from app.extract.models import NoteDraft
+from app.vault.models import Tree, TreeChild, TreeParent
 
 _HERE = Path(__file__).parent
 _FIXTURES = _HERE / "fixtures"
 _RESULTS = _HERE / "results"
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+
+@dataclass
+class ExtractResult:
+    """一个样本的产出:草稿、各自的归类、提取这一步的 token 消耗。"""
+
+    drafts: list[NoteDraft]
+    classifications: list[Placement]
+    usage: dict
 
 
 @dataclass
@@ -69,36 +78,41 @@ def load_fixtures(limit: int | None = None) -> list[Fixture]:
     return fixtures
 
 
+def _tree(counts: Counter[str]) -> Tree:
+    parents: dict[str, list[TreeChild]] = {}
+    for path, count in counts.items():
+        parent, child = path.split("/", 1)
+        parents.setdefault(parent, []).append(
+            TreeChild(name=child, path=path, locked=False, count=count)
+        )
+    return Tree(
+        total=sum(counts.values()),
+        inbox=0,
+        categories=[
+            TreeParent(name=p, locked=False, count=sum(c.count for c in kids), children=kids)
+            for p, kids in parents.items()
+        ],
+    )
+
+
 def process(
-    fixtures: list[Fixture],
-    leaves: list[str],
-    tags: list[str],
-    extract_model: str | None,
-    classify_model: str | None,
+    fixtures: list[Fixture], extract_model: str | None
 ) -> list[tuple[Fixture, ExtractResult]]:
-    """按顺序处理,累积 known_domains。"""
-    known: Counter[str] = Counter()
+    """按顺序处理,分类树从空开始逐个样本累积。"""
+    counts: Counter[str] = Counter()
     out: list[tuple[Fixture, ExtractResult]] = []
 
     for fx in fixtures:
-        # 快照:本样本只能看到「它之前」积累的领域,倒序传入
-        known_domains = [(name, count) for name, count in known.most_common()]
-
         drafts, usage = extract_drafts(fx.image, fx.text, override=extract_model)
-        classifications: list[ClassifyResult] = []
-        agg = dict(usage)
-        for draft in drafts:
-            cr, u = classify(draft, leaves, tags, known_domains, override=classify_model)
-            classifications.append(cr)
-            agg["input_tokens"] += u["input_tokens"]
-            agg["output_tokens"] += u["output_tokens"]
-
-        out.append((fx, ExtractResult(drafts=drafts, classifications=classifications, usage=agg)))
-
-        # 处理完再累积,喂给下一个样本
-        for cr in classifications:
-            if cr.suggested_domain:
-                known[cr.suggested_domain] += 1
+        # 本样本只能看到「它之前」累积出来的分类树
+        placements = classify_notes(
+            [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in drafts],
+            _tree(counts),
+        )
+        out.append((fx, ExtractResult(drafts=drafts, classifications=placements, usage=usage)))
+        for placement in placements:
+            if placement.category:
+                counts[placement.category] += 1
 
     return out
 
@@ -107,7 +121,7 @@ def process(
 
 
 def metric_domain_consistency(results: list[tuple[Fixture, ExtractResult]]) -> dict:
-    """【最重要】每个 expected_domain_group 内,模型产出的 suggested_domain 众数占比。
+    """【最重要】每个 expected_domain_group 内,模型给出的**大块**的众数占比。
 
     1.0 = 完全一致。同时列出每组实际产出的所有不同取值,方便看它在哪儿分叉。
     """
@@ -117,8 +131,8 @@ def metric_domain_consistency(results: list[tuple[Fixture, ExtractResult]]) -> d
         if group is None:
             continue
         for cr in er.classifications:
-            if cr.suggested_domain:
-                by_group.setdefault(group, []).append(cr.suggested_domain)
+            if cr.parent:
+                by_group.setdefault(group, []).append(cr.parent)
 
     per_group = {}
     shares = []
@@ -162,9 +176,7 @@ def metric_title_keywords(results: list[tuple[Fixture, ExtractResult]]) -> dict:
     return {"hit_rate": round(sum(scores) / len(scores), 3) if scores else None, "n": len(scores)}
 
 
-def metric_category_accuracy(results: list[tuple[Fixture, ExtractResult]], taxonomy_empty: bool) -> dict:
-    if taxonomy_empty:
-        return {"note": "taxonomy 为空,分类准确率不适用"}
+def metric_category_accuracy(results: list[tuple[Fixture, ExtractResult]]) -> dict:
     leaf_hits = leaf_total = top_hits = top_total = 0
     for fx, er in results:
         expected = fx.meta.get("expected_category")
@@ -231,19 +243,17 @@ def build_report(
     results: list[tuple[Fixture, ExtractResult]],
     extract_model: str,
     classify_model: str,
-    taxonomy_empty: bool,
 ) -> dict:
     return {
         "timestamp": datetime.now().astimezone().isoformat(),
         "extract_model": extract_model,
         "classify_model": classify_model,
-        "taxonomy_empty": taxonomy_empty,
         "num_samples": len(results),
         "metrics": {
             "domain_consistency": metric_domain_consistency(results),
             "granularity": metric_granularity(results),
             "title_keywords": metric_title_keywords(results),
-            "category_accuracy": metric_category_accuracy(results, taxonomy_empty),
+            "category_accuracy": metric_category_accuracy(results),
             "confidence_calibration": metric_confidence_calibration(results),
             "tokens": metric_tokens(results),
         },
@@ -254,7 +264,7 @@ def build_report(
                 "expected_note_count": fx.meta.get("expected_note_count"),
                 "produced_note_count": len(er.drafts),
                 "titles": [d.title for d in er.drafts],
-                "domains": [cr.suggested_domain for cr in er.classifications],
+                "parents": [cr.parent for cr in er.classifications],
                 "categories": [cr.category for cr in er.classifications],
                 "confidences": [cr.confidence for cr in er.classifications],
                 "usage": er.usage,
@@ -271,25 +281,19 @@ def _sanitize(name: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="提取层评测")
     parser.add_argument("--extract-model", default=None)
-    parser.add_argument("--classify-model", default=None)
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
-
-    root = default_vault_root()
-    taxonomy = TaxonomyManager(root / "taxonomy.yaml")
-    leaves = taxonomy.leaf_categories()
-    tags = taxonomy.load().tags
-    taxonomy_empty = not leaves
 
     fixtures = load_fixtures(limit=args.limit)
     if not fixtures:
         raise SystemExit(f"没有找到样本:请把图片/.txt + 同名 .yaml 放进 {_FIXTURES}")
 
-    results = process(fixtures, leaves, tags, args.extract_model, args.classify_model)
+    results = process(fixtures, args.extract_model)
 
-    extract_model = args.extract_model or config.EXTRACT_MODEL or "?"
-    classify_model = args.classify_model or config.CLASSIFY_MODEL or "?"
-    report = build_report(results, extract_model, classify_model, taxonomy_empty)
+    current = settings.load()
+    extract_model = args.extract_model or current.extract_model or "?"
+    classify_model = current.classify_model or "?"
+    report = build_report(results, extract_model, classify_model)
 
     _RESULTS.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")

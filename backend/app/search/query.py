@@ -20,8 +20,8 @@ _RANK_FTS = 2
 _RANK_BROWSE = 3
 
 _ROW_COLUMNS = (
-    "path, id, title, category, suggested_domain, tags, aliases, summary, status,"
-    " verified, confidence, updated"
+    "path, id, title, category, category_locked, tags, aliases, summary, status,"
+    " confidence, updated"
 )
 
 
@@ -143,13 +143,34 @@ def retrieve_for_question(
     return [ref for _key, ref in scored[:limit]]
 
 
-def list_recent(index: SearchIndex, limit: int = 50) -> list[NoteRef]:
-    """GET /api/notes：最近更新的笔记（含 inbox，不含 archived），新的在前。"""
+def list_recent(
+    index: SearchIndex,
+    limit: int = 50,
+    category: str | None = None,
+    status: str | None = None,
+) -> list[NoteRef]:
+    """GET /api/notes：最近更新的笔记，新的在前，不含 archived。
+
+    category 是「大块/小块」时只列该小块，只给「大块」时列它下面所有小块；都只列 active 的。
+    status="inbox" 只列待整理的。两个都不给：全部笔记，含待整理。
+    """
+    where, params = "status != 'archived'", []
+    if status == "inbox":
+        where = "status = 'inbox'"
+    elif category:
+        where = "status = 'active' AND "
+        if "/" in category:
+            where += "category = ?"
+            params.append(category)
+        else:
+            # 不用 LIKE：分类名里可能有 % 和 _
+            where += "substr(category, 1, ?) = ?"
+            params += [len(category) + 1, category + "/"]
     with index.connect() as conn:
         cursor = conn.execute(
-            f"SELECT {_ROW_COLUMNS} FROM notes WHERE status != 'archived'"
+            f"SELECT {_ROW_COLUMNS} FROM notes WHERE {where}"
             " ORDER BY updated DESC, path LIMIT ?",
-            (limit,),
+            (*params, limit),
         )
         return [_to_ref(row) for row in _dict_rows(cursor)]
 
@@ -218,19 +239,56 @@ def refs_by_ids(index: SearchIndex, ids: list[str]) -> list[NoteRef]:
     return [_to_ref(by_id[i]) for i in ids if i in by_id]
 
 
-def distinct_suggested_domains(index: SearchIndex) -> list[tuple[str, int]]:
-    """inbox 笔记里各 suggested_domain 的计数,按计数倒序(同数按名字稳定排序)。
+def find_by_id(index: SearchIndex, note_id: str) -> NoteRef | None:
+    refs = refs_by_ids(index, [note_id])
+    return refs[0] if refs else None
 
-    给整理循环/分类复用当聚类线索:分类时把它注入 prompt,让模型优先复用已有领域名,
-    这是冷启动能收敛的关键。只统计 status=inbox 的笔记(已归档的分类不再是候选领域)。
-    """
+
+def all_refs(index: SearchIndex) -> list[NoteRef]:
+    """全部未归档的笔记，按路径排序（顺序稳定，重新归类分批时用）。"""
+    with index.connect() as conn:
+        cursor = conn.execute(
+            f"SELECT {_ROW_COLUMNS} FROM notes WHERE status != 'archived' ORDER BY path"
+        )
+        return [_to_ref(row) for row in _dict_rows(cursor)]
+
+
+def refs_with_category(index: SearchIndex, category: str) -> list[NoteRef]:
+    """分类字段正好是 category 的全部笔记，不论状态。分类改名、合并、判空时用。"""
+    with index.connect() as conn:
+        cursor = conn.execute(
+            f"SELECT {_ROW_COLUMNS} FROM notes WHERE category = ? ORDER BY path", (category,)
+        )
+        return [_to_ref(row) for row in _dict_rows(cursor)]
+
+
+def category_counts(index: SearchIndex) -> dict[str, int]:
+    """每个「大块/小块」下 status=active 的笔记数。待整理的不计入任何分类（SCHEMA /api/tree）。"""
     with index.connect() as conn:
         rows = conn.execute(
-            "SELECT suggested_domain, COUNT(*) AS n FROM notes"
-            " WHERE status = 'inbox' AND suggested_domain IS NOT NULL"
-            " GROUP BY suggested_domain ORDER BY n DESC, suggested_domain"
+            "SELECT category, COUNT(*) FROM notes"
+            " WHERE status = 'active' AND category IS NOT NULL GROUP BY category"
         ).fetchall()
-    return [(domain, count) for domain, count in rows]
+    return dict(rows)
+
+
+def categories_in_use(index: SearchIndex) -> set[str]:
+    """还有笔记写着的全部分类，含待整理笔记上模型猜的那些。清理空分类时用。"""
+    with index.connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT category FROM notes WHERE category IS NOT NULL"
+        ).fetchall()
+    return {category for (category,) in rows}
+
+
+def status_counts(index: SearchIndex) -> tuple[int, int]:
+    """(未归档的笔记总数, 待整理的笔记数)。"""
+    with index.connect() as conn:
+        total, inbox = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(status = 'inbox'), 0) FROM notes"
+            " WHERE status != 'archived'"
+        ).fetchone()
+    return total, inbox
 
 
 def _to_ref(row: dict) -> NoteRef:
@@ -239,11 +297,10 @@ def _to_ref(row: dict) -> NoteRef:
         path=row["path"],
         title=row["title"],
         category=row["category"],
-        suggested_domain=row["suggested_domain"],
+        category_locked=bool(row["category_locked"]),
         tags=row["tags"],
         summary=row["summary"],
         status=row["status"],
-        verified=bool(row["verified"]),
         updated=row["updated"],
         confidence=row["confidence"],
     )

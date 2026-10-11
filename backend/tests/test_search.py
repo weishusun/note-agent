@@ -1,14 +1,22 @@
 """index.py / query.py：中文全文检索、重建、排序、过滤。"""
 
+import sqlite3
+
 import pytest
 
-from app.search.index import SearchIndex
+from app.search.index import SCHEMA_VERSION, SearchIndex
 from app.search.query import (
     _RANK_ALIAS_EXACT,
     _RANK_TITLE_EXACT,
     _recall_exact,
-    distinct_suggested_domains,
+    all_refs,
+    categories_in_use,
+    category_counts,
+    find_by_id,
+    list_recent,
+    refs_with_category,
     search,
+    status_counts,
 )
 from app.vault.store import VaultStore
 from tests.conftest import make_note
@@ -27,7 +35,7 @@ def test_chinese_fulltext_search(store: VaultStore, index: SearchIndex) -> None:
         store,
         index,
         title="动态规划入门",
-        category="cs-fundamentals/algorithm",
+        category="计算机基础/算法",
         tags=["动态规划"],
         aliases=["DP"],
         summary="把大问题拆成重叠子问题，记住中间结果。",
@@ -77,19 +85,19 @@ def test_category_and_tag_filter(store: VaultStore, index: SearchIndex) -> None:
         store,
         index,
         title="动态规划入门",
-        category="cs-fundamentals/algorithm",
+        category="计算机基础/算法",
         tags=["动态规划"],
         aliases=[],
         summary="把大问题拆成重叠子问题。",
     )
 
-    only_rag = search(index, "", category="ai-engineering/rag")
+    only_rag = search(index, "", category="AI工程/RAG")
     assert [r.title for r in only_rag] == ["RAG 检索增强生成"]
 
     only_dp = search(index, "", tag="动态规划")
     assert [r.title for r in only_dp] == ["动态规划入门"]
 
-    none = search(index, "检索增强", category="cs-fundamentals/algorithm")
+    none = search(index, "检索增强", category="计算机基础/算法")
     assert none == []
 
 
@@ -99,7 +107,7 @@ def test_rebuild_after_deleting_db(store: VaultStore, index: SearchIndex) -> Non
         store,
         index,
         title="动态规划入门",
-        category="cs-fundamentals/algorithm",
+        category="计算机基础/算法",
         tags=["动态规划"],
         aliases=[],
         summary="把大问题拆成重叠子问题。",
@@ -131,7 +139,6 @@ def test_inbox_hidden_by_default_and_ranked_last(store: VaultStore, index: Searc
         category=None,
         status="inbox",
         confidence=0.3,
-        suggested_domain="缓存策略",
         summary="低置信度的缓存失效碎片。",
         aliases=[],
     )
@@ -151,7 +158,6 @@ def test_rebuild_keeps_inbox_notes(store: VaultStore, index: SearchIndex) -> Non
         category=None,
         status="inbox",
         confidence=0.3,
-        suggested_domain="检索技术",
         aliases=[],
     )
 
@@ -213,7 +219,7 @@ def test_alias_match_is_exact_not_substring(store: VaultStore, index: SearchInde
         store,
         index,
         title="存储引擎选型",
-        category="ai-engineering/agent",
+        category="AI工程/Agent",
         tags=[],
         aliases=["storage"],
         summary="对比几类存储引擎的取舍。",
@@ -239,7 +245,7 @@ def test_exact_match_is_case_insensitive(store: VaultStore, index: SearchIndex) 
         store,
         index,
         title="LangGraph 状态机",
-        category="ai-engineering/agent",
+        category="AI工程/Agent",
         tags=["LangGraph", "状态管理"],
         aliases=["RAG"],
         summary="用 LangGraph 建模带状态的执行图。",
@@ -261,43 +267,51 @@ def test_exact_match_is_case_insensitive(store: VaultStore, index: SearchIndex) 
     assert [r.title for r in search(index, "langgraph 状态机")] == ["LangGraph 状态机"]
 
 
-def test_rebuild_preserves_suggested_domain_and_verified(
-    store: VaultStore, index: SearchIndex
-) -> None:
-    active = _create_and_index(store, index)  # 创建时 verified 被强制 false
-    generated = _create_and_index(
-        store,
-        index,
-        title="角动量算符的对易关系",
-        category=None,
-        status="inbox",
-        confidence=0.3,
-        suggested_domain="量子力学",
-        kind="generated",
-        tags=[],
-        aliases=[],
-        summary="三个角动量分量互不对易。",
-        body="## 要点\n（待补充）\n\n## 待核实\n> 以下内容由模型生成，尚未核实。\n\n- [Lx, Ly] = iħLz\n",
-    )
-    assert active.path is not None and generated.path is not None
-
-    # 人工核实 active 笔记：手工把文件里的 verified 翻成 true
-    target = store.root / active.path
-    text = target.read_text(encoding="utf-8")
-    target.write_text(text.replace("verified: false", "verified: true"), encoding="utf-8")
+def test_rebuild_preserves_category_and_lock(store: VaultStore, index: SearchIndex) -> None:
+    plain = _create_and_index(store, index)
+    pinned = _create_and_index(store, index, title="动态规划入门", category="计算机基础/算法", aliases=[])
+    assert plain.path is not None and pinned.path is not None
+    # 锁定只能事后产生（创建时一律不锁）
+    store.update_frontmatter(pinned.path, category_locked=True)
 
     index.db_path.unlink()
     assert index.rebuild_all() == 2
 
     with index.connect() as conn:
-        rows = dict(
-            conn.execute("SELECT path, suggested_domain FROM notes").fetchall()
-        )
-        assert rows[generated.path.as_posix()] == "量子力学"
-        assert rows[active.path.as_posix()] is None
-        verified = dict(conn.execute("SELECT path, verified FROM notes").fetchall())
-        assert verified[active.path.as_posix()] == 1  # 人工核实过的重建后仍为 true
-        assert verified[generated.path.as_posix()] == 0
+        rows = {
+            path: (category, locked)
+            for path, category, locked in conn.execute(
+                "SELECT path, category, category_locked FROM notes"
+            )
+        }
+    assert rows[plain.path.as_posix()] == ("AI工程/RAG", 0)
+    assert rows[pinned.path.as_posix()] == ("计算机基础/算法", 1)
+
+
+def test_old_index_schema_is_rebuilt_but_ingest_log_survives(
+    store: VaultStore, index: SearchIndex
+) -> None:
+    """表结构版本不符：notes / notes_fts 丢弃重建，ingest_log 保留（SCHEMA 第 4 节）。"""
+    index.db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(index.db_path)
+    conn.executescript(
+        """
+        CREATE TABLE notes (path TEXT PRIMARY KEY, suggested_domain TEXT, verified INTEGER);
+        CREATE TABLE ingest_log (input_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL, result TEXT NOT NULL);
+        CREATE VIRTUAL TABLE notes_fts USING fts5(path UNINDEXED, title, tokenize = 'trigram');
+        INSERT INTO notes VALUES ('notes/旧.md', '人工智能', 0);
+        INSERT INTO ingest_log VALUES ('abc', '2026-10-11', '{"created": ["01X"], "skipped": false}');
+        """
+    )
+    conn.close()
+
+    note = _create_and_index(store, index)  # 新结构下能正常写入
+
+    with index.connect() as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert [p for (p,) in conn.execute("SELECT path FROM notes")] == [note.path.as_posix()]
+    assert index.get_ingest_log("abc") == ["01X"]
+    assert [r.title for r in search(index, "检索增强")] == ["RAG 检索增强生成"]
 
 
 def test_search_returns_id_and_rebuild_preserves_it(
@@ -328,37 +342,54 @@ def test_notes_without_id_are_indexed_as_null(store: VaultStore, index: SearchIn
     assert [r.id for r in results] == [None, None]
 
 
-def test_distinct_suggested_domains(store: VaultStore, index: SearchIndex) -> None:
-    """按计数倒序,只统计 inbox 且 suggested_domain 非空的笔记。"""
-    for i in range(3):
-        _create_and_index(
-            store,
-            index,
-            title=f"量子碎片 {i}",
-            category=None,
-            status="inbox",
-            confidence=0.3,
-            suggested_domain="量子力学",
-            tags=[],
-            aliases=[],
-            summary="量子力学的碎片。",
-        )
-    _create_and_index(
-        store,
-        index,
-        title="缓存碎片",
-        category=None,
-        status="inbox",
-        confidence=0.3,
-        suggested_domain="缓存策略",
-        tags=[],
-        aliases=[],
-        summary="缓存的碎片。",
-    )
-    # active 笔记(有分类、suggested_domain 为 None)不计入
-    _create_and_index(store, index)
+@pytest.fixture
+def categorized(store: VaultStore, index: SearchIndex) -> dict[str, str]:
+    """四条笔记：两条在 AI工程/RAG，一条在 计算机基础/算法，一条待整理（带着模型猜的分类）。"""
+    specs = {
+        "RAG 入门": dict(category="AI工程/RAG"),
+        "向量检索": dict(category="AI工程/RAG"),
+        "动态规划": dict(category="计算机基础/算法"),
+        "拿不准的笔记": dict(category="AI工程/Agent", status="inbox", confidence=0.4),
+    }
+    ids = {}
+    for day, (title, extra) in enumerate(specs.items(), start=1):
+        note = make_note(title=title, aliases=[], **extra)
+        stamp = note.frontmatter.updated.replace(day=day)
+        note.frontmatter = note.frontmatter.model_copy(update={"updated": stamp})
+        store.create_note(note)
+        index.upsert_note(note)
+        ids[title] = note.frontmatter.id
+    return ids
 
-    assert distinct_suggested_domains(index) == [("量子力学", 3), ("缓存策略", 1)]
+
+def test_category_counts_only_count_active(categorized: dict, index: SearchIndex) -> None:
+    assert category_counts(index) == {"AI工程/RAG": 2, "计算机基础/算法": 1}
+    assert status_counts(index) == (4, 1)
+    # 待整理笔记上模型猜的分类也算「在用」，清理空分类时不能把它删了
+    assert categories_in_use(index) == {"AI工程/RAG", "计算机基础/算法", "AI工程/Agent"}
+
+
+def test_list_recent_filters(categorized: dict, index: SearchIndex) -> None:
+    def titles(**kwargs) -> list[str]:
+        return [r.title for r in list_recent(index, **kwargs)]
+
+    assert titles() == ["拿不准的笔记", "动态规划", "向量检索", "RAG 入门"]  # 新的在前，含待整理
+    assert titles(category="AI工程/RAG") == ["向量检索", "RAG 入门"]
+    assert titles(category="AI工程") == ["向量检索", "RAG 入门"]  # 大块：列它下面所有小块，只列 active
+    assert titles(category="计算机基础") == ["动态规划"]
+    assert titles(category="AI") == []  # 前缀相同的别的名字不能混进来
+    assert titles(status="inbox") == ["拿不准的笔记"]
+    assert titles(limit=1) == ["拿不准的笔记"]
+
+
+def test_lookups_by_id_and_category(categorized: dict, index: SearchIndex) -> None:
+    ref = find_by_id(index, categorized["动态规划"])
+    assert ref is not None and (ref.title, ref.category_locked) == ("动态规划", False)
+    assert find_by_id(index, "不存在的id") is None
+
+    assert [r.title for r in refs_with_category(index, "AI工程/Agent")] == ["拿不准的笔记"]
+    assert [r.title for r in refs_with_category(index, "AI工程/RAG")] == ["RAG 入门", "向量检索"]
+    assert len(all_refs(index)) == 4
 
 
 def test_remove_note(store: VaultStore, index: SearchIndex) -> None:

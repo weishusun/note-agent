@@ -1,4 +1,4 @@
-"""录入流水线：拆分 → 分类 → 写入（落盘、入索引、git 提交）。顺序执行，只新建不修改。"""
+"""录入流水线：拆分 → 归类 → 写入（落盘、入索引、git 提交）。顺序执行，只新建不修改。"""
 
 import hashlib
 import logging
@@ -6,14 +6,14 @@ import subprocess
 import time
 from collections.abc import Callable
 
-from app.extract.extractor import _image_mime, classify_batch, extract_drafts
+from app.extract.classifier import NoteBrief
+from app.extract.extractor import _image_mime, extract_drafts
 from app.ingest.assemble import assemble_note
+from app.organize.service import Organizer
 from app.search.index import SearchIndex
-from app.search.query import distinct_suggested_domains
 from app.vault import git
 from app.vault.models import SourceKind
 from app.vault.store import VaultStore, sanitize_filename
-from app.vault.taxonomy import TaxonomyManager
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +28,8 @@ def input_hash(kind: str, payload: bytes) -> str:
 
 def run_ingest(
     store: VaultStore,
-    taxonomy: TaxonomyManager,
     index: SearchIndex,
+    organizer: Organizer,
     *,
     kind: SourceKind,
     text: str | None = None,
@@ -43,11 +43,9 @@ def run_ingest(
     extracted = time.perf_counter()
 
     on_stage("分类")
-    results = classify_batch(
-        drafts,
-        taxonomy.leaf_categories(),
-        taxonomy.load().tags,
-        distinct_suggested_domains(index),
+    # 这份输入产出的所有草稿在一次调用里一起归类；归类失败不会抛，分不上的进待整理
+    placements = organizer.classify(
+        [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in drafts]
     )
 
     classified = time.perf_counter()
@@ -61,10 +59,11 @@ def run_ingest(
     link_targets.update(sanitize_filename(d.title) for d in drafts)
 
     ids: list[str] = []
-    for draft, result in zip(drafts, results):
+    for draft, (category, confidence) in zip(drafts, placements):
         note = assemble_note(
             draft,
-            result,
+            category=category,
+            confidence=confidence,
             kind=kind,
             asset_path=asset_path,
             text=text,

@@ -4,7 +4,14 @@
 > 实现与本文件冲突时,改实现,不改本文件。
 > 确需改本文件时,必须同一次 commit 内同步修改 `backend/app/vault/models.py`。
 
-**版本:v3**
+**版本:v4**
+v3 → v4 变更(需求基准见 [REQUIREMENTS.md](REQUIREMENTS.md),本版只覆盖其第 1 步「自动分类和目录树」):
+分类改为**模型自动产生并写入**、可手动修改且手动改动被锁定(§3 整节重写);`category` 直接用中文名 `大块/小块`,
+不再有 key 与 label 之分(§3);frontmatter 删除 `suggested_domain` 与 `verified`、新增 `category_locked`(§2.2);
+新笔记一律写入 `notes/`,`status` 只写在 frontmatter、文件不再随状态移动(§1);删除分类提议与审批流程
+(`proposals.yaml`、`/api/proposals`、`/api/reorganize`);新增 `GET /api/tree`、`PUT /api/notes/{id}/category`、
+`/api/categories`、`POST /api/reclassify`(§5);重写不变量 3、5、10,删除不变量 11。
+
 v2 → v3 变更:新增 `id` 字段(§2.2)、`title` 不再要求与文件名一致(§2.2)、`category` 为 null 时 `confidence` 统一写 0.0(§2.2)、明确 inbox 的两种成因(§2.2)、`notes` 表加 `id` 列且 `ingest_log.result` 改存 id(§4)、`matched_category` 定义为查询理解(§5)、`POST /api/ingest` 加 `force` 与 `GET /api/jobs/{job_id}` 加 `duplicate`(§5)、`NoteRef` 加 `id`(§5)、重写不变量 1(index.db 豁免范围)与不变量 8(幂等语义)、补充不变量 6 与 10、新增不变量 13(vault 非独占)。
 
 v1 → v2 变更:新增 `generated` 来源与 `verified` 字段、新增 `suggested_domain`、新增输入分路策略(§2.4)、分类创建改为聚类驱动(§3.1)、精确匹配改大小写不敏感。
@@ -15,13 +22,14 @@ v1 → v2 变更:新增 `generated` 来源与 `verified` 字段、新增 `sugges
 
 | 术语 | 含义 |
 |---|---|
-| note | 一条原子知识点,对应 `vault/notes/` 下的一个 `.md` 文件 |
-| category | 分类,取自 `taxonomy.yaml`,**单值**,最多两层 |
-| tag | 受控标签,取自 `taxonomy.yaml`,多值 |
-| suggested_domain | agent 自由生成的领域猜测,**不进 taxonomy**,仅作聚类线索 |
-| MOC | map of content,某分类的索引页,位于 `vault/maps/`,**完全由程序生成** |
-| 录入循环 | 处理单条用户输入 → 落盘,全自动,只允许新建笔记 |
-| 整理循环 | 周期性重整理,可改分类、提议新分类,输出报告供人审阅 |
+| note | 一条笔记,对应 `vault/notes/` 下的一个 `.md` 文件 |
+| category | 分类,**固定两层**:`大块/小块`,如 `人工智能/模型训练`。单值,登记在 `taxonomy.yaml` |
+| 大块 / 小块 | 分类的第一层 / 第二层。大块是学科或领域,小块是该领域下的一个主题 |
+| 锁定 | 使用者手动改过的分类或归属。模型此后不得覆盖,见 §3.3 |
+| 待整理 | `status=inbox` 的笔记:模型拿不准该归到哪,等使用者确认或改正 |
+| tag | 受控标签,取自 `taxonomy.yaml`,多值。v4 暂不由模型填写 |
+| 录入 | 处理一份输入 → 生成笔记 → 自动归类 → 落盘 |
+| 重新归类 | 让模型对已有的、未锁定的笔记重新分类,见 §3.4 |
 
 ---
 
@@ -29,18 +37,18 @@ v1 → v2 变更:新增 `generated` 来源与 `verified` 字段、新增 `sugges
 
 ```
 vault/                       # 独立 git 仓库
-├── taxonomy.yaml            # 分类体系，唯一真相源。允许为空
-├── notes/                   # 已分类的原子笔记，扁平
-├── inbox/                   # 未分类笔记，扁平，等整理循环处理
-├── maps/                    # MOC 索引页，程序生成，可随时删除重建
+├── taxonomy.yaml            # 分类树，程序自动维护，使用者可通过应用修改
+├── notes/                   # 全部笔记，扁平
+├── inbox/                   # 旧目录：v3 及以前的未分类笔记留在这里，v4 起不再写入
+├── maps/                    # 暂不使用（v4 的目录树由应用实时生成，不落文件）
 ├── assets/                  # 截图、上传文件等原始素材
 └── .noteagent/
-    ├── index.db             # SQLite，派生物，可随时删除重建
-    └── proposals.yaml       # 待人工确认的分类提议
+    └── index.db             # SQLite，派生物，可随时删除重建
 ```
 
-**硬规则:`notes/` 和 `inbox/` 必须扁平。** 分类靠 frontmatter 表达,不靠目录。
-理由:整理循环会频繁改分类,改一个 YAML 字段是零风险,移动文件会打断所有 `[[双链]]`。
+**硬规则:`notes/` 必须扁平,文件创建后不移动。** 分类和状态都只写在 frontmatter 里,不靠目录表达。
+理由:分类会被频繁调整,改一个 YAML 字段是零风险,移动文件会打断所有 `[[双链]]`。
+因此「待整理」的笔记也在 `notes/` 里,被归类时文件原地不动;`inbox/` 里的旧笔记同理,留在原处照常使用。
 
 ---
 
@@ -50,8 +58,8 @@ vault/                       # 独立 git 仓库
 
 - 文件名 = `{title}.md`,title 原样保留中文
 - 移除 Windows 非法字符:`\ / : * ? " < > |`,以及首尾空格和结尾的 `.`
-- 冲突时追加 ` (2)`、` (3)`
-- **文件名一旦创建不可变更。** 改名只能由整理循环执行,且必须在同一次操作内重写全库反链
+- 冲突时追加 ` (2)`、` (3)`。**在 `notes/` 与 `inbox/` 两个目录范围内唯一**:双链只写文件名、不带目录
+- **文件名一旦创建不可变更。**(改标题时文件名怎么处理,留到做笔记编辑那一步再定)
 
 ### 2.2 Frontmatter
 
@@ -59,13 +67,12 @@ vault/                       # 独立 git 仓库
 ---
 id: 01JQ8ZK3M7F2VYB4N6R9T0XC5E
 title: 角动量算符的对易关系
-category: physics/quantum-mechanics
-suggested_domain: null
-tags: [算符代数, 待深入]
+category: 物理/量子力学
+category_locked: false
+tags: []
 aliases: [angular momentum commutator, 角动量对易子]
 summary: 三个角动量分量互不对易，对易子按循环置换给出第三个分量。
 status: active
-verified: true
 confidence: 0.88
 created: 2026-07-30T14:22:11+08:00
 updated: 2026-07-30T14:22:11+08:00
@@ -79,14 +86,13 @@ source:
 |---|---|---|---|
 | `id` | str \| null | ✅ | 26 字符 ULID,创建时生成,**永不变更**。见下方「`id` 的语义」 |
 | `title` | str | ✅ | 1–60 字。文件名由它派生,但不要求逐字相同,见下方「`title` 与文件名的关系」 |
-| `category` | str \| null | ✅ | 必须是 taxonomy 中存在的**叶子**路径;`null` 仅当 `status=inbox` |
-| `suggested_domain` | str \| null | ✅ | **`category` 为 null 时必填**,否则必须为 null。自由文本,2–8 字,不受任何词表约束 |
-| `tags` | list[str] | ✅ | 必须是 taxonomy `tags` 的子集,可为空数组,最多 6 个 |
+| `category` | str \| null | ✅ | `大块/小块`,两段都必须有,见 §3.1 的命名规则。`null` 仅当 `status=inbox`(分类调用失败时) |
+| `category_locked` | bool | ✅ | 使用者是否手动指定过本条的分类。为 `true` 时重新归类必须跳过它,见 §3.3。创建时一律 `false` |
+| `tags` | list[str] | ✅ | 必须是 taxonomy `tags` 的子集,可为空数组,最多 6 个。v4 录入时一律写 `[]` |
 | `aliases` | list[str] | ✅ | 可为空。导航层的一等公民,尽量多填,含英文名和缩写 |
 | `summary` | str | ✅ | ≤ 50 字,一句话 |
-| `status` | enum | ✅ | `active` \| `inbox` \| `archived`。inbox 有两种成因,见下方「inbox 的两种成因」 |
-| `verified` | bool | ✅ | 人是否确认过本条内容。**创建时一律 false,任何来源都一样。**只有人工操作可翻为 true。`source.kind` 记录来源且不可变,两者是独立的两件事,不得互相推导 |
-| `confidence` | float | ✅ | 0–1,**分类**置信度(不是内容置信度)。见下方「`confidence` 与未分类」 |
+| `status` | enum | ✅ | `active` \| `inbox` \| `archived`。`inbox` 即「待整理」,见下方 |
+| `confidence` | float | ✅ | 0–1,**分类**置信度(不是内容置信度)。使用者手动指定分类后写 `1.0`;`category` 为 null 时写 `0.0` |
 | `created` / `updated` | ISO8601 带时区 | ✅ | 本地时区 |
 | `source.kind` | enum | ✅ | `screenshot` \| `text` \| `url` \| `file` \| `generated` |
 | `source.ref` | str | ✅ | 见下表 |
@@ -104,22 +110,22 @@ source:
 **`id` 的语义:** 笔记的稳定标识符。`path` 是**位置**不是**身份**——用户在 Obsidian 里改标题会重命名文件,`path` 随之改变,`id` 不变。任何需要长期指向一条笔记的地方(`ingest_log`、提议证据、外部引用)都用 `id`,不用 `path`。
 
 - **允许为 `null` 的唯一情形**:用户直接在 Obsidian 里手建的笔记。agent 创建的笔记 `id` 必填。
-- **系统不得在读取时为无 `id` 的笔记补写 `id`。** 那是对已有笔记的修改,违反不变量 5。
+- **系统不得在读取时为无 `id` 的笔记补写 `id`。** 读取不应该有副作用。
 - **`id` 由写入层(`store.create_note`)在创建时生成,模型层不生成默认值。** 模型层给默认值会连读取路径一起触发,等于绕过上一条。
 
 **`title` 与文件名的关系:** 文件名由 `title` 经 §2.1 安全化规则得到,两者**不要求逐字相同**。`title` 在 frontmatter 中原样保留,不受文件名安全化影响。例如 `title: 问: RAG/FC 有何区别?` 对应的文件名是 `问 RAGFC 有何区别.md`。
 
-**`confidence` 与未分类:** `category` 为 `null` 时 `confidence` 统一写 `0.0`,表示「**未做分类**」而非「分类置信度极低」。做 eval 统计时这些 `0.0` **必须排除**,否则会把「没分类」的样本当成「分错了」的样本,把整体指标压低。
+**待整理(`status=inbox`):** 只有两种情况会进待整理,都应该是少数:
 
-**inbox 的两种成因:**
-
-| inbox 成因 | 判据 | 整理循环的处理 |
+| 成因 | 判据 | 界面上怎么处理 |
 |---|---|---|
-| 装不下 | `category == null`,`suggested_domain` 必填 | 按 `suggested_domain` 聚类,达阈值提议**建新分类** |
-| 低置信 | `category != null`,`suggested_domain` 为 `null` | 按 `category` 聚类,某叶子下堆积达阈值提议 **split 或标记该叶子边界模糊** |
+| 模型拿不准 | `category` 有值,`confidence < 0.6` | 显示模型猜的分类,使用者点一下确认,或改到别处 |
+| 分类调用失败 | `category == null`,`confidence == 0.0` | 使用者手动指定,或稍后「重新归类」 |
 
-`category != null` 且 `status == inbox` 是**合法组合**。低置信度落 inbox 时 `category` **保留、不清空**,`suggested_domain` 保持 `null`(见不变量 10)。
-两种成因的信号完全不同:前者说明 taxonomy 缺一块,后者说明 taxonomy 有一块的边界不清楚。混成一种就都读不出来了。
+做统计时 `confidence == 0.0` 的是「没分上类」,不是「分错了」,必须排除。
+
+**旧字段的兼容:** v3 及以前的笔记里有 `suggested_domain` 和 `verified` 两个键。**读取时忽略、不报错**;
+该笔记下一次被程序改写(比如重新归类)时这两个键随之消失。不做一次性的批量迁移。
 
 ### 2.3 正文结构
 
@@ -147,22 +153,7 @@ source:
   该区块保留标题,内容写 `（暂无）`
 - `kind=text` 用引用块;`kind=file` 给出文件链接和位置锚点
 
-**`kind=generated` 的额外规则:**
-
-模型自行产出的内容**必须**单独放进 `## 待核实` 区块,不得与其他区块混排,且 `## 要点` 初始为空:
-
-```markdown
-## 要点
-（待补充）
-
-## 待核实
-> 以下内容由模型生成，尚未核实。确认后请移入「要点」并把 verified 改为 true。
-
-- [Lx, Ly] = iħLz
-- L² 与任一分量对易
-```
-
-理由:一旦模型生成的内容和你自己记的内容在库里长得一样,整个库的可信度就归零了。物理、数学这类有大量精确表述的主题尤其危险——错一个系数你不会发现,而你查这条笔记时正是在拿它当参考。
+> 「模型用自身知识补充的内容」怎么在正文里单独标出,留到做笔记质量那一步(REQUIREMENTS 第 2 步)定义。
 
 ### 2.4 输入分路策略
 
@@ -183,66 +174,88 @@ PDF 第一版只支持有文本层的。扫描件提取失败时明确报错,**�
 
 ---
 
-## 3. taxonomy.yaml
+## 3. 分类
+
+### 3.1 taxonomy.yaml
 
 ```yaml
-version: 1
-updated: 2026-07-30
+version: 2
+updated: 2026-10-11
 
-categories: {}    # 允许为空。分类从笔记聚类中长出，不预先设计
+categories:
+  人工智能:                  # 大块
+    locked: false
+    children:
+      模型训练: { locked: true }     # 小块；使用者改过名，已锁定
+      模型结构: { locked: false }
+  算法:
+    locked: true
+    children:
+      动态规划: { locked: false }
+
 tags: []
 ```
 
-约束:
+- **固定两层。** 笔记的 `category` 是 `大块/小块`,不允许只写大块,也不允许第三层。
+- **名字就是标识。** 不再有英文 key 加中文 label 的区分,文件里写的就是界面上显示的。
+  代价是改名要改写该分类下所有笔记的 frontmatter(见 §3.3),这个代价可以接受:移动和合并本来就要改写。
+- **命名规则**(大块、小块相同):去首尾空白后 1–12 个字,不含 `/`。同一层内**大小写不敏感地唯一**。
+- 任何代码**不得**硬编码分类名或标签名。
+- **允许完全为空。** 空分类树是新知识库的正常起点,录入第一条笔记时就会长出第一个大块和小块。
+- 本文件由程序维护。对它的读写必须经过 `app/vault/taxonomy.py`,写入用原子替换。
 
-1. **最多两层。** `category` 的值是 `parent/child`,不允许只写 `parent`
-2. `tags` 是扁平的封闭词表
-3. 任何代码**不得**硬编码分类名或标签名,一律从本文件读
-4. **本文件只能由人工确认后写入。** 录入循环和整理循环都不得直接修改它
-5. **允许完全为空。** 空 taxonomy 下所有笔记进 inbox,这是正常的冷启动状态,不是错误
+### 3.2 录入时自动归类
 
-### 3.1 分类如何产生
+**一份输入产出的所有笔记,在一次模型调用里一起归类。** 调用时给模型看当前整棵分类树(大块、小块、各自的笔记数),
+模型对每条笔记给出 `大块`、`小块`、`置信度`:
 
-核心规则:**分类由「一批笔记的聚类」产生,不由「单条笔记」产生。**
+1. 已有的小块合适 → 用它。
+2. 大块合适但没有合适的小块 → 在该大块下**新建小块**。
+3. 没有合适的大块 → **新建大块和小块**。
 
-危险的从来不是自动创建分类,而是写一条笔记时顺手创建一个分类——那必然导致大量只有一篇笔记的空壳分类。若创建依据是「inbox 里已堆积 9 条同领域笔记」,该分类天然有内容支撑。
+程序拿到结果后:
 
-流程:
+- 按 §3.1 的命名规则校验;与已有分类大小写不敏感相同的,**沿用已有的写法**(模型写 `Rag` 而库里是 `RAG`,用 `RAG`)。
+- 缺的大块、小块立即写进 `taxonomy.yaml`,`locked: false`。**不需要使用者确认。**
+- `置信度 < 0.6` → 笔记 `status=inbox`,`category` 保留模型的猜测。阈值定义在 `app/config.py`。
+- 名字不合法,或整次分类调用失败 → 该笔记 `category=null`、`status=inbox`、`confidence=0.0`。
+  **分类失败不得让录入失败**:笔记照常保存,只是进待整理。
 
-1. 录入循环遇到装不下的笔记 → 落 `inbox/`,`category: null`,填 `suggested_domain`
-2. `suggested_domain` 是**全系统唯一允许模型自由生成的字段**,它不进 taxonomy,只作聚类线索
-3. 整理循环按 `suggested_domain` 聚类,达阈值则写提议进 `.noteagent/proposals.yaml`
-4. 人工确认后才写入 `taxonomy.yaml`,并把相关 inbox 笔记重新归档
+给模型的约束(写在提示词里):优先复用已有分类;不造近义分类(已有「人工智能」就不要再建「AI」);
+大块是学科或领域这一级,小块是领域下的主题、不能具体到这条笔记自己的概念;大块总数要克制。
 
-提议格式:
+### 3.3 手动修改与锁定
 
-```yaml
-proposals:
-  - id: p-2026-07-30-001
-    kind: new_top_level          # new_top_level | new_child | merge | split | rename
-    proposed: physics
-    label: 物理
-    evidence_count: 9
-    evidence:
-      - inbox/角动量算符的对易关系.md
-      - inbox/泡利矩阵.md
-    suggested_children:
-      quantum-mechanics: 6
-      classical-mechanics: 3
-    reason: inbox 中 9 条笔记的 suggested_domain 聚为此类
-    status: pending              # pending | approved | rejected | deferred
-```
+使用者在应用里可以:把一条笔记移到别的分类、确认一条待整理笔记、新建分类、给分类改名、
+把一个分类并入另一个(改成同层已有的名字即合并)、删除空分类。
 
-门槛:
+**锁定规则——手动改过的地方,模型此后不得覆盖:**
 
-| 类型 | 门槛 |
-|---|---|
-| 新增二级分类 | 同聚类 ≥ 4 条 |
-| 新增一级分类 | 同聚类 ≥ 8 条,且与所有现有一级分类的语义距离超过阈值 |
-| 合并 | 两分类语义中心相似度超阈值,或其一 < 2 条且 60 天无新增 |
-| 拆分 | 单叶子 > 20 条 |
+| 使用者的操作 | 被锁定的东西 | 锁定后模型不能做什么 |
+|---|---|---|
+| 移动一条笔记 / 确认一条待整理笔记 | 该笔记:`category_locked: true`,同时 `status=active`、`confidence=1.0` | 重新归类时改它的分类 |
+| 新建、改名、合并分类 | 该分类:`locked: true` | 重新归类时给它改名、把它并掉、把它删掉 |
 
-**每条提议必须附带可点开的证据笔记列表。没有证据的提议不允许生成。**
+锁定**不妨碍**模型把新笔记归进一个锁定的分类,也不妨碍使用者自己再改。
+
+- **改名与合并**会改写该分类下所有笔记的 `category`(不改 `category_locked`)。先改笔记、再改 `taxonomy.yaml`、
+  再更新索引,最后一次 git 提交。中途失败时重做同一个操作必须能把状态补齐(操作要幂等)。
+- **空分类的清理:**未锁定的分类一旦没有笔记就自动从 `taxonomy.yaml` 删掉;锁定的空分类保留,直到使用者自己删。
+  删除只允许对空分类执行。
+
+### 3.4 重新归类
+
+使用者主动触发,后台执行,有进度。两种范围:
+
+| 范围 | 处理哪些笔记 | 用途 |
+|---|---|---|
+| `unsorted` | `category` 为 null 的,和 `status=inbox` 的 | 把待整理的清掉;旧版本留下的未分类笔记迁移进来 |
+| `all` | 所有 `category_locked=false` 的 | 分类树长歪了,让模型整体重排 |
+
+- 每次调用处理一批(20 条左右),批与批之间分类树是累积的,后面的批能看到前面新建的分类。
+- `all` 范围开始时,分类树只保留**锁定的分类**和**含有锁定笔记的分类**,其余由模型重新长出来;结束后按 §3.3 清理空分类。
+- 被处理的笔记按 §3.2 的规则落定:够置信的 `status=active`,不够的留在待整理。
+- 整个过程结束后一次 git 提交。中途失败时已经改完的笔记保持已改状态,不回滚。
 
 ---
 
@@ -256,13 +269,12 @@ CREATE TABLE notes (
   path              TEXT PRIMARY KEY,   -- 相对 vault 根
   id                TEXT UNIQUE,        -- 26 字符 ULID，可空：UNIQUE 允许多个 NULL
   title             TEXT NOT NULL,
-  category          TEXT,
-  suggested_domain  TEXT,
+  category          TEXT,               -- 「大块/小块」，可空
+  category_locked   INTEGER NOT NULL,   -- 0/1
   tags              TEXT NOT NULL,      -- JSON array
   aliases           TEXT NOT NULL,      -- JSON array
   summary           TEXT NOT NULL,
   status            TEXT NOT NULL,
-  verified          INTEGER NOT NULL,   -- 0/1
   confidence        REAL NOT NULL,
   content_hash      TEXT NOT NULL,
   updated           TEXT NOT NULL
@@ -283,6 +295,9 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 > **`tokenize='trigram'` 不可改成默认值。** FTS5 默认分词器按空格切词,对中文等于整段当一个 token,搜「检索增强」会一条都搜不到。trigram 做三字滑窗,中文子串检索才能工作。
 
 `rebuild_all()` 扫描 `notes/` 和 `inbox/` 两个目录。
+
+**表结构版本:**用 `PRAGMA user_version` 记录(v4 = 4)。打开时版本不符就丢弃并重建 `notes` 与 `notes_fts` 两张表,
+随后由启动时的全量重建补回数据。`ingest_log` **不随之丢弃**——它不是从笔记文件派生的,丢了就失去重复录入的检测。
 
 ---
 
@@ -325,6 +340,9 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 `created` 与 `inbox` **互不重叠**:本次新建的笔记里 `status=inbox` 的进 `inbox`,其余进 `created`。
 `job_id` 不存在返回 `404`。任务状态只存在进程内存里,服务重启后查不到。
 
+重新归类(`POST /api/reclassify`)的任务也用这个接口查,此时 `stage` 为 `归类`,并多一个字段
+`"progress": { "done": 40, "total": 132 }`;`created` 与 `inbox` 为空数组。录入任务的 `progress` 为 `null`。
+
 `duplicate: true` 时**不是错误**:输入此前处理过,返回的是当时的结果。要重新处理就带
 `force: true` 重发(见不变量 8)。
 
@@ -336,13 +354,13 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 `include_inbox` 默认 `false`。为 `true` 时 `status=inbox` 的笔记参与召回,且必须排在所有 `active` 笔记之后。
 
-**`matched_category` 是查询理解,不是查询参数回显。** 定义:把 `q` 与 taxonomy 的叶子路径、
-叶子名(路径的后半段,如 `rag`)、叶子 `label`、一级分类名及其 `label` 做**大小写不敏感精确匹配**
-(与不变量 12 同一套规则),命中则填该分类路径,否则 `null`。叶子优先于一级分类。
+**`matched_category` 是查询理解,不是查询参数回显。** 定义:把 `q` 与完整路径(`大块/小块`)、
+小块名、大块名做**大小写不敏感精确匹配**(与不变量 12 同一套规则),命中则填该分类路径
+(命中大块时填大块名),否则 `null`。小块优先于大块。
 
 - 它**不参与 `results` 的排序**,是与 results 并列的第四路结果。
-- 用途:供前端提示「打开这个分类的 MOC」。用户搜「RAG」时,除了命中的笔记,还应该能一步
-  跳到 `ai-engineering/rag` 的索引页。
+- 用途:供前端提示「打开这个分类」。用户搜「RAG」时,除了命中的笔记,还应该能一步
+  跳到 `人工智能/RAG` 在目录树里的位置。
 - 它**不是**把请求里的 `category` 参数原样回显。
 
 ### `POST /api/ask`
@@ -360,7 +378,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 }
 ```
 
-- 检索**包含 inbox 笔记**(冷启动时所有笔记都在 inbox),只排除 `archived`。
+- 检索**包含待整理的笔记**,只排除 `archived`。
 - 召回方式与 `/api/search` 不同,按优先级:① 问题里**包含**某条笔记的标题 ② 问题里包含它的别名
   ③ 检索词与标题/别名**互相包含**(命中的词越多越靠前) ④ 把问题切成三字片段、连同检索词做全文检索。
 - **检索词扩展**:检索前先让文本模型(`CLASSIFY_MODEL`)把问题扩展成若干检索词,弥补字面检索
@@ -370,9 +388,71 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   同一个理由:模型生成的内容不能和你自己记的内容长得一样。
 - 模型调用失败返回 `502`。问答模型读环境变量 `ANSWER_MODEL`,未配置时沿用 `CLASSIFY_MODEL`。
 
-### `GET /api/notes?limit=50` → `[NoteRef]`
+### `GET /api/notes?category=&status=&limit=50` → `[NoteRef]`
 
-最近更新的笔记,新的在前。含 inbox,不含 `archived`。`limit` 1–200。
+最近更新的笔记,新的在前,不含 `archived`。`limit` 1–200。
+
+- `category`:`大块/小块` 只列该小块;只给 `大块` 则列它下面所有小块的笔记。只列 `status=active` 的。
+- `status=inbox`:只列待整理的。与 `category` 不同时使用。
+- 两个都不给:全部笔记,含待整理。
+
+### `GET /api/tree`
+
+目录树,给界面左侧用。
+
+```jsonc
+{
+  "total": 37,                 // 全部笔记数，不含 archived
+  "inbox": 2,                  // 待整理的笔记数
+  "categories": [
+    { "name": "人工智能", "locked": false, "count": 21,
+      "children": [
+        { "name": "模型训练", "path": "人工智能/模型训练", "locked": true, "count": 9 }
+      ] }
+  ]
+}
+```
+
+- `count` 只数 `status=active` 的笔记;大块的 `count` 是它所有小块之和。待整理的笔记只计入 `inbox`,不计入任何分类。
+- 顺序:大块、小块都按 `count` 从多到少,同数按名字。
+- 笔记上写着、但 `taxonomy.yaml` 里没有的分类也要出现在树里(`locked: false`)——不能因为两边不一致就让笔记在界面上消失。
+
+### `PUT /api/notes/{id}/category`
+
+```jsonc
+{ "category": "人工智能/模型训练" }
+```
+→ 改完后的 `NoteRef`。
+
+把一条笔记移到指定分类,或确认一条待整理的笔记(传它当前的分类即可)。效果见 §3.3:该笔记被锁定、
+转为 `active`、`confidence=1.0`。目标分类不存在时自动创建,且因为是使用者建的,`locked: true`。
+`id` 不存在返回 `404`;分类名不合 §3.1 返回 `400`。
+
+### `POST /api/categories` / `PUT /api/categories` / `DELETE /api/categories`
+
+分类名含中文和 `/`,所以路径一律放在请求体或查询参数里,不放在 URL 路径里。三个接口都返回最新的目录树(同 `GET /api/tree`)。
+
+```jsonc
+// POST：新建。path 可以是「大块」或「大块/小块」，后者在大块不存在时一并创建
+{ "path": "人工智能/强化学习" }
+
+// PUT：改名。name 只是这一层的新名字，不是完整路径
+// 改成同层已有的名字 = 把这个分类并进那一个
+{ "path": "人工智能/模型训练", "name": "训练流程" }
+
+// DELETE /api/categories?path=人工智能/强化学习
+```
+
+- 新建、改名、合并得到的分类都 `locked: true`(§3.3)。
+- 删除只允许对没有笔记的分类执行,否则 `409`;删大块要求它下面所有小块都没有笔记。
+- 名字不合 §3.1 返回 `400`;`path` 不存在返回 `404`;新建已存在的分类返回 `409`。
+
+### `POST /api/reclassify`
+
+```jsonc
+{ "scope": "unsorted" }      // unsorted | all，见 §3.4
+```
+→ `202 { "job_id": "01J8X..." }`,进度用 `GET /api/jobs/{job_id}` 查。同一时间只允许一个重新归类任务,已有一个在跑时返回 `409`。
 
 ### `GET /api/notes/{path}` → `{ "frontmatter": {...}, "body": "..." }`
 
@@ -422,28 +502,20 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 ### `GET /api/inbox` → `[NoteRef]`
 
-### `GET /api/proposals` → `[Proposal]` *(阶段 4)*
-
-### `POST /api/proposals/{id}` *(阶段 4)*
-```jsonc
-{ "action": "approve", "rename_to": null }   // approve | reject | defer
-```
-
-### `POST /api/reorganize` → `{ "report_id": "..." }` *(阶段 4)*
+等同于 `GET /api/notes?status=inbox`,保留是为了兼容。
 
 ### NoteRef
 
 ```jsonc
 {
-  "id": "01JQ8ZK3M7F2VYB4N6R9T0XC5E",   // null 表示 Obsidian 手建、无 id 的笔记
+  "id": "01JQ8ZK3M7F2VYB4N6R9T0XC5E",   // null 表示手工放进 vault、无 id 的笔记
   "path": "notes/角动量算符的对易关系.md",
   "title": "角动量算符的对易关系",
-  "category": "physics/quantum-mechanics",
-  "suggested_domain": null,
-  "tags": ["算符代数"],
+  "category": "物理/量子力学",             // 待整理的笔记这里是模型的猜测，也可能是 null
+  "category_locked": false,
+  "tags": [],
   "summary": "三个角动量分量互不对易……",
   "status": "active",
-  "verified": true,
   "updated": "2026-07-30T14:22:11+08:00",
   "confidence": 0.88
 }
@@ -455,18 +527,24 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 违反任何一条即为 bug,不是风格问题。
 
-1. **所有对 `notes/`、`inbox/`、`taxonomy.yaml`、`maps/`、`assets/`、`.noteagent/proposals.yaml` 的读写必须经过 `backend/app/vault/`。** 其他任何位置出现 `open()` 或 `Path.write_text()` 操作这些路径都是违规。
+1. **所有对 `notes/`、`inbox/`、`taxonomy.yaml`、`maps/`、`assets/` 的读写必须经过 `backend/app/vault/`。** 其他任何位置出现 `open()` 或 `Path.write_text()` 操作这些路径都是违规。
    `.noteagent/index.db` 是派生物,由 `app/search/` 管理,但其路径必须从 `VaultStore` 取得。
-   **注意:豁免的是 `index.db` 这个派生物,不是 `.noteagent/` 这个目录。** `proposals.yaml`
-   删了不能重建,它不在豁免范围内
+   **注意:豁免的是 `index.db` 这个派生物,不是 `.noteagent/` 这个目录。**
 2. 所有文件 IO 显式 `encoding="utf-8"`,路径一律 `pathlib.Path`
-3. **分类只能由一批笔记的聚类产生,不能由单条笔记产生。** 录入循环遇到装不下的 → 落 inbox + 填 `suggested_domain`;新建分类一律走 `proposals.yaml` 并经人工确认
+3. **模型可以自动新建分类、自动给笔记归类,但不得覆盖使用者手动改过的地方。** `category_locked=true` 的笔记,
+   重新归类时不得改它的分类;`locked: true` 的分类,模型不得给它改名、合并或删除(§3.3)。
+   手动操作本身不受锁定限制
 4. `tags` 中不在受控词表的项**直接丢弃**,不新建
-5. **录入循环只能创建新文件**,不得修改或删除已有笔记
+5. **录入只新建笔记文件,不修改也不删除已有笔记。** 会改写已有笔记的只有这几种操作,且都是使用者触发的:
+   移动或确认笔记、分类改名与合并、重新归类。v4 里它们**只改 frontmatter 的 `category`、`category_locked`、
+   `status`、`confidence`**(以及顺带去掉旧字段),不动正文,不动文件名,**也不动 `updated`**——
+   改分类不算改内容,否则一次重新归类会让所有笔记都变成「刚更新」
 6. `maps/` 全部由程序生成,任何手写内容会在下次重建时丢失。
    **`maps/` 下每个 MOC 文件顶部必须有一行提示:「本文件由程序生成,手动修改会在下次重建时丢失。」**
    ——用户在 Obsidian 里看不到本契约文档,唯一能看到的警告就是文件里这一行
-7. 每次成功写入以一次 `git commit` 结尾,message 格式:`note: 新建 3 条 (来源 screenshot)`
+7. 每次成功写入以一次 `git commit` 结尾。message 格式:录入 `note: 新建 3 条 (来源 screenshot)`;
+   分类改动 `taxonomy: <做了什么>`,如 `taxonomy: 「模型训练」改名为「训练流程」(改写 9 条)`、
+   `taxonomy: 重新归类 132 条`。提交失败只记日志,不让操作本身算失败
 8. **幂等。** hash 在 `POST /api/ingest` 的 API 边界计算,输入为 `sha256(kind + "\0" + (text or file_bytes))`。
    **filename 不进 hash**——内容相同即同一次输入。
    命中 `ingest_log` 时**不静默跳过**:返回已有结果并置 `duplicate: true`,由用户决定是否带
@@ -476,10 +554,9 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
    理由:`kind=generated` 的输入是用户原话(如「记录量子力学角动量」),用户隔一段时间故意重发是
    正常行为,那时 taxonomy 已经不同,应该产出不同结果,而不是被静默挡回
 9. 写笔记文件用「先写临时文件再原子 rename」,不允许原地半写
-10. `confidence < 0.6` → 强制 `inbox`。阈值定义在 `app/config.py`,**单一阈值 0.6**,待 eval 校准。
-    触发时 `status` 置 `inbox`,`category` **保留不清空**(见 §2.2「inbox 的两种成因」),
-    `suggested_domain` 保持 `null`
-11. 任何来源的笔记**创建时** `verified` 必须为 `false`。`verified` 只能由人工操作翻为 `true`,录入循环和整理循环都不得写入 `true`
+10. 模型给出的分类 `confidence < 0.6` → `status=inbox`(待整理),`category` **保留模型的猜测、不清空**。
+    阈值定义在 `app/config.py`,**单一阈值 0.6**,待 eval 校准。使用者手动指定的分类不受此限
+11. (v4 删除:`verified` 字段已移除)
 12. 精确匹配档(标题、别名)**大小写不敏感**;FTS 档不受此约束
 13. **vault 不是本程序独占的。** 用户会直接在 Obsidian 中编辑、重命名、删除笔记。索引必须能容忍
     外部修改:**SQLite 索引与磁盘不一致时以磁盘为准。** 任何依赖「只有本程序写过 vault」的逻辑都是错的

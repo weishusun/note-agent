@@ -1,0 +1,109 @@
+"""目录树与分类调整的接口（SCHEMA 第 5 节）。
+
+分类名含中文和「/」，所以分类路径一律放在请求体或查询参数里，不放进 URL 路径。
+"""
+
+import logging
+from typing import Literal
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel
+
+from app.ingest.jobs import JobRegistry, Progress
+from app.organize.service import CategoryNotEmpty, NoteNotFound, Organizer, ReclassifyRunning
+from app.vault.models import NoteRef, Tree
+from app.vault.taxonomy import CategoryExists, CategoryNotFound
+
+logger = logging.getLogger(__name__)
+
+
+class NoteCategoryBody(BaseModel):
+    category: str
+
+
+class CategoryCreateBody(BaseModel):
+    path: str
+
+
+class CategoryRenameBody(BaseModel):
+    path: str
+    name: str
+
+
+class ReclassifyBody(BaseModel):
+    scope: Literal["unsorted", "all"]
+
+
+def build_router(organizer: Organizer, jobs: JobRegistry) -> APIRouter:
+    router = APIRouter()
+
+    @router.get("/api/tree")
+    def api_tree() -> Tree:
+        return organizer.tree()
+
+    @router.put("/api/notes/{note_id}/category")
+    def api_move_note(note_id: str, body: NoteCategoryBody) -> NoteRef:
+        try:
+            return organizer.move_note(note_id, body.category)
+        except NoteNotFound:
+            raise HTTPException(status_code=404, detail="笔记不存在")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/api/categories")
+    def api_create_category(body: CategoryCreateBody) -> Tree:
+        try:
+            organizer.create_category(body.path)
+        except CategoryExists as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return organizer.tree()
+
+    @router.put("/api/categories")
+    def api_rename_category(body: CategoryRenameBody) -> Tree:
+        try:
+            organizer.rename_category(body.path, body.name)
+        except CategoryNotFound:
+            raise HTTPException(status_code=404, detail="分类不存在")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return organizer.tree()
+
+    @router.delete("/api/categories")
+    def api_delete_category(path: str) -> Tree:
+        try:
+            organizer.delete_category(path)
+        except CategoryNotFound:
+            raise HTTPException(status_code=404, detail="分类不存在")
+        except CategoryNotEmpty as exc:
+            raise HTTPException(status_code=409, detail=f"「{exc}」里还有笔记，先把它们移走")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return organizer.tree()
+
+    def run_reclassify(job_id: str, scope: str) -> None:
+        jobs.update(job_id, status="running")
+        try:
+            organizer.reclassify(
+                scope,
+                on_progress=lambda done, total: jobs.update(
+                    job_id, progress=Progress(done=done, total=total)
+                ),
+            )
+            jobs.update(job_id, status="done")
+        except Exception as exc:
+            logger.exception("重新归类失败 job=%s", job_id)
+            jobs.update(job_id, status="failed", error=str(exc))
+
+    @router.post("/api/reclassify", status_code=202)
+    def api_reclassify(body: ReclassifyBody, background: BackgroundTasks) -> dict[str, str]:
+        try:
+            organizer.start_reclassify()
+        except ReclassifyRunning:
+            raise HTTPException(status_code=409, detail="已经有一个重新归类的任务在进行")
+        job_id = jobs.create(stage="归类", progress=Progress(done=0, total=0))
+        background.add_task(run_reclassify, job_id, body.scope)
+        return {"job_id": job_id}
+
+    return router

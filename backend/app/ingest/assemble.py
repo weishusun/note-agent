@@ -1,10 +1,10 @@
-"""草稿 + 分类结果 → Note。纯函数，不读写 vault；正文结构见 SCHEMA 2.3。"""
+"""草稿 + 归类结果 → Note。纯函数，不读写 vault；正文结构见 SCHEMA 2.3。"""
 
 from collections.abc import Collection
 from datetime import datetime
 
-from app import config
-from app.extract.models import ClassifyResult, NoteDraft
+from app.extract.models import NoteDraft
+from app.organize.service import placement_status
 from app.vault.models import Note, NoteFrontmatter, SourceKind, SourceRef
 from app.vault.store import sanitize_filename
 
@@ -14,8 +14,9 @@ _TEXT_REF_CHARS = 100
 
 def assemble_note(
     draft: NoteDraft,
-    classification: ClassifyResult,
     *,
+    category: str | None,
+    confidence: float,
     kind: SourceKind,
     asset_path: str | None = None,
     text: str | None = None,
@@ -23,9 +24,10 @@ def assemble_note(
     now: datetime | None = None,
 ) -> Note:
     """link_targets 是「真实存在或本批即将创建」的笔记文件名（不含 .md），
-    related 里对不上的概念不写链接。id 与 verified 留给 store.create_note 定。"""
+    related 里对不上的概念不写链接。category 为 None 或置信度不够时进待整理。
+    id 留给 store.create_note 定。"""
     source, original = _source(kind, asset_path, text)
-    category, suggested_domain, status, confidence = _placement(classification)
+    status, confidence = placement_status(category, confidence)
     stamp = now if now is not None else datetime.now().astimezone()
 
     body = "\n\n".join(
@@ -40,12 +42,9 @@ def assemble_note(
         frontmatter=NoteFrontmatter(
             title=draft.title,
             category=category,
-            suggested_domain=suggested_domain,
-            tags=classification.tags,
             aliases=draft.aliases,
             summary=draft.summary,
             status=status,
-            verified=False,
             confidence=confidence,
             created=stamp,
             updated=stamp,
@@ -53,15 +52,6 @@ def assemble_note(
         ),
         body=body + "\n",
     )
-
-
-def _placement(c: ClassifyResult) -> tuple[str | None, str | None, str, float]:
-    """inbox 的两种成因（SCHEMA 2.2）：装不下 → category 为空；低置信 → category 保留。"""
-    if c.category is None:
-        return None, c.suggested_domain, "inbox", 0.0
-    if c.confidence < config.INBOX_CONFIDENCE_THRESHOLD:
-        return c.category, None, "inbox", c.confidence
-    return c.category, None, "active", c.confidence
 
 
 def _source(kind: SourceKind, asset_path: str | None, text: str | None) -> tuple[SourceRef, str]:

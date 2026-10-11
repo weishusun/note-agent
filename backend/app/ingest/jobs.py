@@ -1,4 +1,4 @@
-"""录入任务的进程内登记表。只存在内存里，服务重启即清空。"""
+"""后台任务（录入、重新归类）的进程内登记表。只存在内存里，服务重启即清空。"""
 
 import threading
 from typing import Literal
@@ -9,7 +9,12 @@ from app.vault.ids import new_ulid
 from app.vault.models import NoteRef
 
 JobStatus = Literal["pending", "running", "done", "failed"]
-Stage = Literal["解析", "拆分", "分类", "写入"]
+Stage = Literal["解析", "拆分", "分类", "写入", "归类"]
+
+
+class Progress(BaseModel):
+    done: int
+    total: int
 
 
 class JobState(BaseModel):
@@ -19,6 +24,8 @@ class JobState(BaseModel):
     inbox: list[NoteRef] = []
     duplicate: bool = False
     error: str | None = None
+    # 只有重新归类的任务有进度；录入任务为 None
+    progress: Progress | None = None
 
 
 class JobRegistry:

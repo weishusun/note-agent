@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import Response
@@ -15,6 +16,8 @@ from app.ask.answer import AskResult, answer_question
 from app.config import default_vault_root
 from app.ingest.jobs import JobRegistry, JobState
 from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
+from app.organize.api import build_router as build_organize_router
+from app.organize.service import Organizer
 from app.search.index import SearchIndex
 from app.search.query import list_inbox, list_recent, refs_by_ids, search
 from app.settings_api import router as settings_router
@@ -85,6 +88,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     store = VaultStore(root)
     taxonomy = TaxonomyManager(root / "taxonomy.yaml")
     index = SearchIndex(store)
+    organizer = Organizer(store, taxonomy, index)
     jobs = JobRegistry()
 
     @asynccontextmanager
@@ -93,6 +97,8 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         # 放在 lifespan 而不是 create_app 里：导入本模块不该去写 vault
         try:
             logger.info("启动时重建索引: %d 条笔记", index.rebuild_all())
+            # 笔记上写着但 taxonomy.yaml 里没有的分类补登记，未锁定的空分类清掉
+            organizer.reconcile()
         except Exception:
             logger.exception("启动时重建索引失败，沿用现有索引")
         yield
@@ -100,6 +106,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     app = FastAPI(title="note-agent", lifespan=lifespan)
 
     app.include_router(settings_router)
+    app.include_router(build_organize_router(organizer, jobs))
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -114,8 +121,8 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         try:
             ids = run_ingest(
                 store,
-                taxonomy,
                 index,
+                organizer,
                 kind=kind,
                 text=text,
                 image=image,
@@ -177,8 +184,12 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}")
 
     @app.get("/api/notes")
-    def api_notes(limit: int = Query(default=50, ge=1, le=200)) -> list[NoteRef]:
-        return list_recent(index, limit)
+    def api_notes(
+        category: str | None = None,
+        status: Literal["inbox"] | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> list[NoteRef]:
+        return list_recent(index, limit, category=category, status=status)
 
     @app.post("/api/reindex")
     def api_reindex() -> dict[str, int]:

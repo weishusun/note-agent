@@ -3,6 +3,7 @@
 - 所有写入先写 .tmp 再 os.replace 原子替换
 - 所有 IO 显式 encoding="utf-8"，路径一律 pathlib.Path
 - create_note 只创建不覆盖，重名追加 " (2)"、" (3)"
+- 笔记文件创建后不移动：分类和状态只写在 frontmatter 里（SCHEMA 第 1 节）
 """
 
 import os
@@ -85,8 +86,13 @@ class VaultStore:
         return f"---\n{yaml_text}---\n\n{note.body.strip()}\n"
 
     @staticmethod
-    def _unique_path(directory: Path, stem: str, suffix: str) -> Path:
+    def _unique_path(
+        directory: Path, stem: str, suffix: str, also_avoid: tuple[Path, ...] = ()
+    ) -> Path:
         """独占创建一个 0 字节占位文件并返回它的路径，重名按 " (2)"、" (3)" 递增。
+
+        also_avoid：别的目录里已有同名文件时也要跳过。双链只写文件名、不带目录，
+        notes/ 和 inbox/ 里各有一个「RAG.md」的话链接就有歧义了。
 
         不用 exists() 判断：check-then-act 在并发下所有调用方都会看到「文件不存在」、
         全都选中同一个路径，再被 os.replace 静默互相覆盖。改成 open(..., "x")
@@ -99,6 +105,9 @@ class VaultStore:
         for _ in range(_MAX_UNIQUE_ATTEMPTS):
             name = f"{stem}{suffix}" if n == 1 else f"{stem} ({n}){suffix}"
             candidate = directory / name
+            if any((other / name).exists() for other in also_avoid):
+                n += 1
+                continue
             try:
                 with open(candidate, "x", encoding="utf-8"):
                     pass
@@ -137,22 +146,20 @@ class VaultStore:
         return paths
 
     def create_note(self, note: Note) -> Path:
-        """只创建新文件，绝不覆盖。status=inbox 落 inbox/，其余落 notes/。
+        """只创建新文件，绝不覆盖。一律落 notes/，待整理的也一样（SCHEMA 第 1 节）。
 
-        不变量 11：任何来源创建时 verified 一律 false，传入值被忽略，
-        只有人工编辑文件才能翻为 true。
-
-        id 同样是创建时语义：一律在这里生成，忽略调用方传入的值。放在写入层而不是
-        模型层，是因为模型层的 default_factory 会在解析时也触发——读一篇 Obsidian
-        手建的、没有 id 键的笔记，会被当场捏一个新 id，读两次还不一样（SCHEMA 2.2）。
+        id 和 category_locked 是创建时语义，一律在这里定，忽略调用方传入的值。
+        id 放在写入层而不是模型层生成，是因为模型层的 default_factory 会在解析时也触发——
+        读一篇没有 id 键的笔记会被当场捏一个新 id，读两次还不一样（SCHEMA 2.2）。
         """
         note.frontmatter = note.frontmatter.model_copy(
-            update={"verified": False, "id": new_ulid()}
+            update={"id": new_ulid(), "category_locked": False}
         )
         fm = note.frontmatter
-        directory = self.inbox_dir if fm.status == "inbox" else self.notes_dir
         stem = sanitize_filename(fm.title)
-        target = self._unique_path(directory, stem, ".md")
+        target = self._unique_path(
+            self.notes_dir, stem, ".md", also_avoid=(self.inbox_dir,)
+        )
         try:
             self._atomic_write_text(target, self._serialize_note(note))
         except BaseException:
@@ -165,6 +172,17 @@ class VaultStore:
         rel = target.relative_to(self.root)
         note.path = rel
         return rel
+
+    def update_frontmatter(self, rel_path: str | Path, **changes: object) -> Note:
+        """改写一条已有笔记的 frontmatter 字段，正文和文件名不动（SCHEMA 不变量 5）。
+
+        改完的 frontmatter 会重新走一遍模型校验；旧版本留下的多余键在这次改写中消失。
+        """
+        note = self.read_note(rel_path)
+        merged = {**note.frontmatter.model_dump(mode="python"), **changes}
+        note.frontmatter = NoteFrontmatter.model_validate(merged)
+        self._atomic_write_text(self._resolve(rel_path), self._serialize_note(note))
+        return note
 
     # ---------- MOC ----------
 

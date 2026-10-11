@@ -1,16 +1,17 @@
-"""ingest/assemble.py：正文四段结构、落 inbox 的判定、双链只指向真实文件。"""
+"""ingest/assemble.py：正文四段结构、进不进待整理的判定、双链只指向真实文件。"""
 
 from datetime import datetime
 
 import pytest
 
 from app import config
-from app.extract.models import ClassifyResult, NoteDraft
+from app.extract.models import NoteDraft
 from app.ingest.assemble import assemble_note
 from app.vault.store import VaultStore
 from tests.conftest import TZ
 
 NOW = datetime(2026, 8, 6, 9, 30, 0, tzinfo=TZ)
+RAG = "AI工程/RAG"
 
 
 def _draft(**overrides) -> NoteDraft:
@@ -25,22 +26,20 @@ def _draft(**overrides) -> NoteDraft:
     return NoteDraft(**fields)
 
 
-def _classified(confidence: float = 0.9) -> ClassifyResult:
-    return ClassifyResult(category="ai-engineering/rag", tags=["向量检索"], confidence=confidence)
-
-
-def _unclassified() -> ClassifyResult:
-    return ClassifyResult(category=None, suggested_domain="AI工程", confidence=0.0)
+def _assemble(draft: NoteDraft | None = None, **kwargs):
+    kwargs.setdefault("category", RAG)
+    kwargs.setdefault("confidence", 0.9)
+    kwargs.setdefault("now", NOW)
+    if "kind" not in kwargs:
+        kwargs.update(kind="text", text="原文")
+    return assemble_note(draft or _draft(), **kwargs)
 
 
 def test_screenshot_body_is_exact_four_sections() -> None:
-    note = assemble_note(
-        _draft(),
-        _classified(),
+    note = _assemble(
         kind="screenshot",
         asset_path="assets/2026-08-06-093000.png",
         link_targets=["Prompt Engineering"],
-        now=NOW,
     )
     assert note.body == (
         "## 一句话\n"
@@ -57,19 +56,17 @@ def test_screenshot_body_is_exact_four_sections() -> None:
         "![[assets/2026-08-06-093000.png]]\n"
     )
     fm = note.frontmatter
-    assert fm.source.kind == "screenshot"
-    assert fm.source.ref == "assets/2026-08-06-093000.png"
+    assert (fm.source.kind, fm.source.ref) == ("screenshot", "assets/2026-08-06-093000.png")
     assert fm.summary == "生成前先检索相关片段，拼进上下文再作答。"
     assert fm.aliases == ["检索增强生成", "Retrieval-Augmented Generation"]
-    assert fm.tags == ["向量检索"]
+    assert fm.tags == []
     assert fm.created == NOW and fm.updated == NOW
-    assert fm.verified is False
-    assert fm.id is None
+    assert (fm.id, fm.category_locked) == (None, False)
 
 
 def test_text_source_is_quoted_and_ref_truncated_to_100() -> None:
     text = "第一行" + "长" * 150 + "\n\n第三行"
-    note = assemble_note(_draft(), _classified(), kind="text", text=f"  {text}\n", now=NOW)
+    note = _assemble(kind="text", text=f"  {text}\n")
 
     assert note.frontmatter.source.kind == "text"
     assert note.frontmatter.source.ref == text[:100]
@@ -79,58 +76,41 @@ def test_text_source_is_quoted_and_ref_truncated_to_100() -> None:
 
 def test_related_links_only_real_files() -> None:
     draft = _draft(related=["prompt engineering", "不存在的概念", "RAG", "问: A/B?", "Prompt Engineering"])
-    note = assemble_note(
-        draft,
-        _classified(),
-        kind="text",
-        text="原文",
-        link_targets=["Prompt Engineering", "RAG", "问 AB"],
-        now=NOW,
-    )
+    note = _assemble(draft, link_targets=["Prompt Engineering", "RAG", "问 AB"])
     related = note.body.split("## 关联\n", 1)[1].split("\n\n", 1)[0]
     # 大小写不敏感对齐到真实文件名、去重、不链接自己、文件名按安全化规则匹配
     assert related == "- [[Prompt Engineering]]\n- [[问 AB]]"
 
 
 def test_no_linkable_related_writes_placeholder() -> None:
-    note = assemble_note(_draft(), _classified(), kind="text", text="原文", now=NOW)
+    note = _assemble()
     assert "## 关联\n（暂无）\n\n## 原始输入" in note.body
     assert "[[" not in note.body
 
 
-def test_unclassified_goes_to_inbox_with_domain() -> None:
-    fm = assemble_note(_draft(), _unclassified(), kind="text", text="原文", now=NOW).frontmatter
-    assert (fm.status, fm.category, fm.suggested_domain, fm.confidence) == (
-        "inbox",
-        None,
-        "AI工程",
-        0.0,
-    )
+def test_confident_placement_is_active() -> None:
+    fm = _assemble(confidence=0.9).frontmatter
+    assert (fm.status, fm.category, fm.confidence) == ("active", RAG, 0.9)
 
 
-def test_low_confidence_goes_to_inbox_but_keeps_category() -> None:
-    """不变量 10：低置信落 inbox 时 category 保留、suggested_domain 为空。"""
-    fm = assemble_note(
-        _draft(), _classified(confidence=0.59), kind="text", text="原文", now=NOW
-    ).frontmatter
-    assert (fm.status, fm.category, fm.suggested_domain, fm.confidence) == (
-        "inbox",
-        "ai-engineering/rag",
-        None,
-        0.59,
-    )
+def test_low_confidence_goes_to_inbox_but_keeps_the_guess() -> None:
+    """不变量 10：模型拿不准时进待整理，category 保留它的猜测。"""
+    fm = _assemble(confidence=0.59).frontmatter
+    assert (fm.status, fm.category, fm.confidence) == ("inbox", RAG, 0.59)
 
 
 def test_confidence_at_threshold_is_active() -> None:
     assert config.INBOX_CONFIDENCE_THRESHOLD == 0.6
-    fm = assemble_note(
-        _draft(), _classified(confidence=0.6), kind="text", text="原文", now=NOW
-    ).frontmatter
-    assert fm.status == "active"
+    assert _assemble(confidence=0.6).frontmatter.status == "active"
+
+
+def test_failed_classification_goes_to_inbox_without_category() -> None:
+    fm = _assemble(category=None, confidence=0.8).frontmatter
+    assert (fm.status, fm.category, fm.confidence) == ("inbox", None, 0.0)
 
 
 def test_default_timestamp_has_timezone() -> None:
-    fm = assemble_note(_draft(), _classified(), kind="text", text="原文").frontmatter
+    fm = _assemble(now=None).frontmatter
     assert fm.created.tzinfo is not None
 
 
@@ -145,16 +125,14 @@ def test_default_timestamp_has_timezone() -> None:
 )
 def test_invalid_source_raises(kwargs: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        assemble_note(_draft(), _classified(), now=NOW, **kwargs)
+        _assemble(**kwargs)
 
 
 def test_assembled_note_round_trips_through_store(store: VaultStore) -> None:
-    note = assemble_note(
-        _draft(), _classified(confidence=0.3), kind="text", text="原文", now=NOW
-    )
+    note = _assemble(confidence=0.3)
     rel = store.create_note(note)
 
-    assert rel.as_posix() == "inbox/RAG.md"
+    assert rel.as_posix() == "notes/RAG.md"  # 待整理的也落在 notes/
     read = store.read_note(rel)
     assert read.frontmatter == note.frontmatter
     assert read.frontmatter.id is not None

@@ -1,8 +1,6 @@
-"""数据契约模型，与 docs/SCHEMA.md 2.2 节一一对应。
+"""数据契约模型，与 docs/SCHEMA.md 2.2 节（笔记）和 3.1 节（分类树）一一对应。
 
-注意：category 是否存在于 taxonomy 不在这里校验（需要读文件），
-由 taxonomy.TaxonomyManager.is_valid_category 返回可判定结果，调用方决定落 inbox。
-本模块只做结构性约束。
+本模块只做结构性约束。分类是否登记在 taxonomy.yaml 不在这里校验（需要读文件）。
 """
 
 from datetime import datetime
@@ -14,6 +12,33 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Status = Literal["active", "inbox", "archived"]
 SourceKind = Literal["screenshot", "text", "url", "file", "generated"]
 
+CATEGORY_NAME_MAX = 12
+CATEGORY_SEP = "/"
+
+
+def clean_category_name(name: str) -> str:
+    """按 SCHEMA 3.1 的命名规则规整一层分类名，不合规抛 ValueError。"""
+    cleaned = (name or "").strip()
+    if not cleaned:
+        raise ValueError("分类名不能为空")
+    if CATEGORY_SEP in cleaned:
+        raise ValueError(f"分类名里不能有「{CATEGORY_SEP}」: {cleaned}")
+    if len(cleaned) > CATEGORY_NAME_MAX:
+        raise ValueError(f"分类名最长 {CATEGORY_NAME_MAX} 个字: {cleaned}")
+    return cleaned
+
+
+def split_category(path: str) -> tuple[str, str]:
+    """把「大块/小块」拆成两段并各自规整。不是恰好两段就抛 ValueError。"""
+    parts = (path or "").split(CATEGORY_SEP)
+    if len(parts) != 2:
+        raise ValueError(f"分类必须是「大块{CATEGORY_SEP}小块」两层: {path!r}")
+    return clean_category_name(parts[0]), clean_category_name(parts[1])
+
+
+def join_category(parent: str, child: str) -> str:
+    return f"{parent}{CATEGORY_SEP}{child}"
+
 
 class SourceRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -23,24 +48,21 @@ class SourceRef(BaseModel):
 
 
 class NoteFrontmatter(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # ignore 而不是 forbid：v3 及以前的笔记带着 suggested_domain / verified 两个旧键，
+    # 读取时忽略，下次改写时自然消失（SCHEMA 2.2「旧字段的兼容」）
+    model_config = ConfigDict(extra="ignore")
 
-    # 笔记的稳定标识符，创建时生成、永不变更（SCHEMA 2.2）。path 是位置不是身份：
-    # 用户在 Obsidian 里改标题会重命名文件，path 变，id 不变。
-    # 为 null 只允许一种情形：用户直接在 Obsidian 手建的笔记。
-    # 读取时不得为无 id 的笔记补写 id，那是修改已有笔记，违反不变量 5。
-    # id 由 store.create_note 在写入层生成，模型层不生成，否则读取无 id 的笔记
-    # 会被静默补写：default_factory 会在解析时当场捏一个新 ULID，读两次得到两个值。
+    # 笔记的稳定标识符，创建时生成、永不变更。由 store.create_note 在写入层生成：
+    # 模型层给默认值会在读取无 id 的笔记时当场捏一个新的，读两次得到两个值。
     id: str | None = None
     title: str = Field(min_length=1, max_length=60)
     category: str | None
-    # 全系统唯一允许模型自由生成的字段，不进 taxonomy，只作聚类线索（SCHEMA 3.1）
-    suggested_domain: str | None
-    tags: list[str] = Field(max_length=6)
-    aliases: list[str]
+    # 使用者手动指定过分类：重新归类必须跳过（SCHEMA 3.3）
+    category_locked: bool = False
+    tags: list[str] = Field(default_factory=list, max_length=6)
+    aliases: list[str] = Field(default_factory=list)
     summary: str = Field(min_length=1, max_length=50)
     status: Status
-    verified: bool
     confidence: float = Field(ge=0.0, le=1.0)
     created: datetime
     updated: datetime
@@ -58,15 +80,12 @@ class NoteFrontmatter(BaseModel):
         if self.category is None:
             if self.status != "inbox":
                 raise ValueError("category 为 null 时 status 必须是 inbox")
-            if self.suggested_domain is None:
-                raise ValueError("category 为 null 时 suggested_domain 必填")
-            if not 2 <= len(self.suggested_domain) <= 8:
-                raise ValueError("suggested_domain 必须是 2–8 字")
-        elif self.suggested_domain is not None:
-            raise ValueError("category 有值时 suggested_domain 必须为 null")
-        # verified 与 source.kind 相互独立，不得互相推导（SCHEMA 2.2）。
-        # 「创建时一律 false」由 store.create_note 在写入层强制，模型层允许 True，
-        # 因为读回已人工核实的笔记时需要
+        else:
+            # 这里只要求是两段非空；长度等命名规则在写入路径上校验，
+            # 读取时从宽——不能因为手工改出的一个长名字就读不了整条笔记
+            parts = self.category.split(CATEGORY_SEP)
+            if len(parts) != 2 or not all(p.strip() for p in parts):
+                raise ValueError(f"category 必须是「大块{CATEGORY_SEP}小块」两层")
         return self
 
 
@@ -78,16 +97,15 @@ class Note(BaseModel):
 
 
 class NoteRef(BaseModel):
-    # null 表示 Obsidian 手建、无 id 的笔记（SCHEMA 第 5 节）
+    # null 表示手工放进 vault、无 id 的笔记（SCHEMA 第 5 节）
     id: str | None
     path: str
     title: str
     category: str | None
-    suggested_domain: str | None
+    category_locked: bool
     tags: list[str]
     summary: str
     status: Status
-    verified: bool
     updated: datetime
     confidence: float
 
@@ -101,39 +119,86 @@ class NoteRef(BaseModel):
             path=note.path.as_posix(),
             title=fm.title,
             category=fm.category,
-            suggested_domain=fm.suggested_domain,
+            category_locked=fm.category_locked,
             tags=fm.tags,
             summary=fm.summary,
             status=fm.status,
-            verified=fm.verified,
             updated=fm.updated,
             confidence=fm.confidence,
         )
 
 
-class TaxonomyLeaf(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class TaxonomyChild(BaseModel):
+    """小块。extra=ignore：兼容 v1 格式里的 label 键。"""
 
-    label: str
+    model_config = ConfigDict(extra="ignore")
+
+    locked: bool = False
 
 
 class TaxonomyParent(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """大块。"""
 
-    label: str
-    children: dict[str, TaxonomyLeaf]
+    model_config = ConfigDict(extra="ignore")
+
+    locked: bool = False
+    children: dict[str, TaxonomyChild] = Field(default_factory=dict)
+
+    @field_validator("children", mode="before")
+    @classmethod
+    def _none_children(cls, v: object) -> object:
+        # yaml 里「小块名:」后面什么都不写会解析成 None
+        if isinstance(v, dict):
+            return {name: ({} if node is None else node) for name, node in v.items()}
+        return {} if v is None else v
 
 
 class Taxonomy(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
-    version: int
-    updated: str
-    categories: dict[str, TaxonomyParent]
-    tags: list[str]
+    version: int = 2
+    updated: str = ""
+    categories: dict[str, TaxonomyParent] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
 
     @field_validator("updated", mode="before")
     @classmethod
     def _date_to_str(cls, v: object) -> str:
         # yaml 会把 2026-07-30 解析成 date 对象
         return str(v)
+
+    @field_validator("categories", mode="before")
+    @classmethod
+    def _none_nodes(cls, v: object) -> object:
+        if isinstance(v, dict):
+            return {name: ({} if node is None else node) for name, node in v.items()}
+        return {} if v is None else v
+
+    def leaves(self) -> list[str]:
+        return [
+            join_category(parent, child)
+            for parent, node in self.categories.items()
+            for child in node.children
+        ]
+
+
+class TreeChild(BaseModel):
+    name: str
+    path: str
+    locked: bool
+    count: int
+
+
+class TreeParent(BaseModel):
+    name: str
+    locked: bool
+    count: int
+    children: list[TreeChild]
+
+
+class Tree(BaseModel):
+    """GET /api/tree 的响应（SCHEMA 第 5 节）。"""
+
+    total: int
+    inbox: int
+    categories: list[TreeParent]
