@@ -86,6 +86,71 @@ def test_manually_verified_reads_back_true(store: VaultStore) -> None:
     assert store.read_note(rel).frontmatter.verified is True
 
 
+def test_create_note_generates_id(store: VaultStore) -> None:
+    note = make_note()
+    assert note.frontmatter.id is None  # 模型层不生成，构造出来就是 None
+
+    rel = store.create_note(note)
+    new_id = note.frontmatter.id
+
+    assert new_id is not None
+    assert len(new_id) == 26
+    # 内存对象与落盘内容一致
+    assert store.read_note(rel).frontmatter.id == new_id
+
+
+def test_create_note_ignores_caller_supplied_id(store: VaultStore) -> None:
+    """id 和 verified 一样是写入层的创建时语义，调用方传什么都不算数。"""
+    note = make_note()
+    note.frontmatter = note.frontmatter.model_copy(update={"id": "调用方伪造的 id"})
+
+    rel = store.create_note(note)
+
+    assert note.frontmatter.id != "调用方伪造的 id"
+    assert len(note.frontmatter.id) == 26
+    assert store.read_note(rel).frontmatter.id == note.frontmatter.id
+
+
+def test_read_note_never_backfills_id(store: VaultStore) -> None:
+    """Obsidian 手建的笔记 frontmatter 里没有 id 键，读多少次都必须是 None。
+
+    这条钉住的是「读取不得补写 id」（SCHEMA 2.2 / 不变量 5）：
+    模型层一旦给 id 配 default_factory，这里每次读都会拿到一个不同的新 ULID。
+    """
+    target = store.notes_dir / "Obsidian 手建的笔记.md"
+    target.write_text(
+        "---\n"
+        "title: Obsidian 手建的笔记\n"
+        "category: ai-engineering/rag\n"
+        "suggested_domain: null\n"
+        "tags: []\n"
+        "aliases: []\n"
+        "summary: 用户直接在 Obsidian 里建的，frontmatter 里没有 id 键。\n"
+        "status: active\n"
+        "verified: false\n"
+        "confidence: 0.5\n"
+        "created: 2026-07-30T14:22:11+08:00\n"
+        "updated: 2026-07-30T14:22:11+08:00\n"
+        "source:\n"
+        "  kind: text\n"
+        "  ref: 手写\n"
+        "---\n"
+        "\n"
+        "正文\n",
+        encoding="utf-8",
+    )
+    rel = Path("notes/Obsidian 手建的笔记.md")
+
+    first = store.read_note(rel)
+    second = store.read_note(rel)
+
+    assert first.frontmatter.id is None
+    assert second.frontmatter.id is None
+    assert first.frontmatter.id == second.frontmatter.id
+    # 文件本身也没有被补写
+    assert "id:" not in target.read_text(encoding="utf-8")
+
+
 def test_no_leftover_tmp_files(store: VaultStore) -> None:
     store.create_note(make_note())
     store.save_asset(b"\x89PNG", "png")

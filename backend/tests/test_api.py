@@ -46,6 +46,7 @@ def test_get_search(client: TestClient) -> None:
     ref = data["results"][0]
     assert ref["path"] == "notes/RAG 检索增强生成.md"
     assert set(ref) == {
+        "id",
         "path",
         "title",
         "category",

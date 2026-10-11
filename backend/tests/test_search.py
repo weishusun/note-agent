@@ -300,6 +300,34 @@ def test_rebuild_preserves_suggested_domain_and_verified(
         assert verified[generated.path.as_posix()] == 0
 
 
+def test_search_returns_id_and_rebuild_preserves_it(
+    store: VaultStore, index: SearchIndex
+) -> None:
+    """NoteRef.id 来自索引的 id 列；删库重建后仍是落盘的那个 id，不重新生成。"""
+    note = _create_and_index(store, index)
+    created_id = note.frontmatter.id
+    assert created_id is not None
+
+    assert [r.id for r in search(index, "检索增强")] == [created_id]
+
+    index.db_path.unlink()
+    index.rebuild_all()
+    assert [r.id for r in search(index, "检索增强")] == [created_id]
+
+
+def test_notes_without_id_are_indexed_as_null(store: VaultStore, index: SearchIndex) -> None:
+    """Obsidian 手建的笔记没有 id：多条都能入索引（UNIQUE 允许多个 NULL），检索返回 null。"""
+    for title in ("手建笔记甲", "手建笔记乙"):
+        note = make_note(title=title, aliases=[])
+        note.path = store.create_note(note)
+        note.frontmatter = note.frontmatter.model_copy(update={"id": None})
+        index.upsert_note(note)
+
+    results = search(index, "手建笔记")
+    assert len(results) == 2
+    assert [r.id for r in results] == [None, None]
+
+
 def test_distinct_suggested_domains(store: VaultStore, index: SearchIndex) -> None:
     """按计数倒序,只统计 inbox 且 suggested_domain 非空的笔记。"""
     for i in range(3):

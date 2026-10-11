@@ -25,6 +25,13 @@ class SourceRef(BaseModel):
 class NoteFrontmatter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # 笔记的稳定标识符，创建时生成、永不变更（SCHEMA 2.2）。path 是位置不是身份：
+    # 用户在 Obsidian 里改标题会重命名文件，path 变，id 不变。
+    # 为 null 只允许一种情形：用户直接在 Obsidian 手建的笔记。
+    # 读取时不得为无 id 的笔记补写 id，那是修改已有笔记，违反不变量 5。
+    # id 由 store.create_note 在写入层生成，模型层不生成，否则读取无 id 的笔记
+    # 会被静默补写：default_factory 会在解析时当场捏一个新 ULID，读两次得到两个值。
+    id: str | None = None
     title: str = Field(min_length=1, max_length=60)
     category: str | None
     # 全系统唯一允许模型自由生成的字段，不进 taxonomy，只作聚类线索（SCHEMA 3.1）
@@ -71,6 +78,8 @@ class Note(BaseModel):
 
 
 class NoteRef(BaseModel):
+    # null 表示 Obsidian 手建、无 id 的笔记（SCHEMA 第 5 节）
+    id: str | None
     path: str
     title: str
     category: str | None
@@ -88,6 +97,7 @@ class NoteRef(BaseModel):
             raise ValueError("note.path 未设置，无法生成 NoteRef")
         fm = note.frontmatter
         return cls(
+            id=fm.id,
             path=note.path.as_posix(),
             title=fm.title,
             category=fm.category,

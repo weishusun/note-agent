@@ -18,7 +18,7 @@ _RANK_FTS = 2
 _RANK_BROWSE = 3
 
 _ROW_COLUMNS = (
-    "path, title, category, suggested_domain, tags, aliases, summary, status,"
+    "path, id, title, category, suggested_domain, tags, aliases, summary, status,"
     " verified, confidence, updated"
 )
 
@@ -89,6 +89,7 @@ def distinct_suggested_domains(index: SearchIndex) -> list[tuple[str, int]]:
 
 def _to_ref(row: dict) -> NoteRef:
     return NoteRef(
+        id=row["id"],
         path=row["path"],
         title=row["title"],
         category=row["category"],

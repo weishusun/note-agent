@@ -4,7 +4,9 @@
 > 实现与本文件冲突时,改实现,不改本文件。
 > 确需改本文件时,必须同一次 commit 内同步修改 `backend/app/vault/models.py`。
 
-**版本:v2**
+**版本:v3**
+v2 → v3 变更:新增 `id` 字段(§2.2)、`title` 不再要求与文件名一致(§2.2)、`category` 为 null 时 `confidence` 统一写 0.0(§2.2)、明确 inbox 的两种成因(§2.2)、`notes` 表加 `id` 列且 `ingest_log.result` 改存 id(§4)、`matched_category` 定义为查询理解(§5)、`POST /api/ingest` 加 `force` 与 `GET /api/jobs/{job_id}` 加 `duplicate`(§5)、`NoteRef` 加 `id`(§5)、重写不变量 1(index.db 豁免范围)与不变量 8(幂等语义)、补充不变量 6 与 10、新增不变量 13(vault 非独占)。
+
 v1 → v2 变更:新增 `generated` 来源与 `verified` 字段、新增 `suggested_domain`、新增输入分路策略(§2.4)、分类创建改为聚类驱动(§3.1)、精确匹配改大小写不敏感。
 
 ---
@@ -55,6 +57,7 @@ vault/                       # 独立 git 仓库
 
 ```yaml
 ---
+id: 01JQ8ZK3M7F2VYB4N6R9T0XC5E
 title: 角动量算符的对易关系
 category: physics/quantum-mechanics
 suggested_domain: null
@@ -74,15 +77,16 @@ source:
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
-| `title` | str | ✅ | 1–60 字,与文件名一致 |
+| `id` | str \| null | ✅ | 26 字符 ULID,创建时生成,**永不变更**。见下方「`id` 的语义」 |
+| `title` | str | ✅ | 1–60 字。文件名由它派生,但不要求逐字相同,见下方「`title` 与文件名的关系」 |
 | `category` | str \| null | ✅ | 必须是 taxonomy 中存在的**叶子**路径;`null` 仅当 `status=inbox` |
 | `suggested_domain` | str \| null | ✅ | **`category` 为 null 时必填**,否则必须为 null。自由文本,2–8 字,不受任何词表约束 |
 | `tags` | list[str] | ✅ | 必须是 taxonomy `tags` 的子集,可为空数组,最多 6 个 |
 | `aliases` | list[str] | ✅ | 可为空。导航层的一等公民,尽量多填,含英文名和缩写 |
 | `summary` | str | ✅ | ≤ 50 字,一句话 |
-| `status` | enum | ✅ | `active` \| `inbox` \| `archived` |
+| `status` | enum | ✅ | `active` \| `inbox` \| `archived`。inbox 有两种成因,见下方「inbox 的两种成因」 |
 | `verified` | bool | ✅ | 人是否确认过本条内容。**创建时一律 false,任何来源都一样。**只有人工操作可翻为 true。`source.kind` 记录来源且不可变,两者是独立的两件事,不得互相推导 |
-| `confidence` | float | ✅ | 0–1,**分类**置信度(不是内容置信度) |
+| `confidence` | float | ✅ | 0–1,**分类**置信度(不是内容置信度)。见下方「`confidence` 与未分类」 |
 | `created` / `updated` | ISO8601 带时区 | ✅ | 本地时区 |
 | `source.kind` | enum | ✅ | `screenshot` \| `text` \| `url` \| `file` \| `generated` |
 | `source.ref` | str | ✅ | 见下表 |
@@ -96,6 +100,26 @@ source:
 | `url` | 完整链接 |
 | `file` | `assets/` 下的相对路径,可加 `#p12` 形式的页码锚点 |
 | `generated` | 触发生成的用户原话,如「记录量子力学角动量」 |
+
+**`id` 的语义:** 笔记的稳定标识符。`path` 是**位置**不是**身份**——用户在 Obsidian 里改标题会重命名文件,`path` 随之改变,`id` 不变。任何需要长期指向一条笔记的地方(`ingest_log`、提议证据、外部引用)都用 `id`,不用 `path`。
+
+- **允许为 `null` 的唯一情形**:用户直接在 Obsidian 里手建的笔记。agent 创建的笔记 `id` 必填。
+- **系统不得在读取时为无 `id` 的笔记补写 `id`。** 那是对已有笔记的修改,违反不变量 5。
+- **`id` 由写入层(`store.create_note`)在创建时生成,模型层不生成默认值。** 模型层给默认值会连读取路径一起触发,等于绕过上一条。
+
+**`title` 与文件名的关系:** 文件名由 `title` 经 §2.1 安全化规则得到,两者**不要求逐字相同**。`title` 在 frontmatter 中原样保留,不受文件名安全化影响。例如 `title: 问: RAG/FC 有何区别?` 对应的文件名是 `问 RAGFC 有何区别.md`。
+
+**`confidence` 与未分类:** `category` 为 `null` 时 `confidence` 统一写 `0.0`,表示「**未做分类**」而非「分类置信度极低」。做 eval 统计时这些 `0.0` **必须排除**,否则会把「没分类」的样本当成「分错了」的样本,把整体指标压低。
+
+**inbox 的两种成因:**
+
+| inbox 成因 | 判据 | 整理循环的处理 |
+|---|---|---|
+| 装不下 | `category == null`,`suggested_domain` 必填 | 按 `suggested_domain` 聚类,达阈值提议**建新分类** |
+| 低置信 | `category != null`,`suggested_domain` 为 `null` | 按 `category` 聚类,某叶子下堆积达阈值提议 **split 或标记该叶子边界模糊** |
+
+`category != null` 且 `status == inbox` 是**合法组合**。低置信度落 inbox 时 `category` **保留、不清空**,`suggested_domain` 保持 `null`(见不变量 10)。
+两种成因的信号完全不同:前者说明 taxonomy 缺一块,后者说明 taxonomy 有一块的边界不清楚。混成一种就都读不出来了。
 
 ### 2.3 正文结构
 
@@ -229,6 +253,7 @@ proposals:
 ```sql
 CREATE TABLE notes (
   path              TEXT PRIMARY KEY,   -- 相对 vault 根
+  id                TEXT UNIQUE,        -- 26 字符 ULID，可空：UNIQUE 允许多个 NULL
   title             TEXT NOT NULL,
   category          TEXT,
   suggested_domain  TEXT,
@@ -245,7 +270,7 @@ CREATE TABLE notes (
 CREATE TABLE ingest_log (
   input_hash    TEXT PRIMARY KEY,   -- 输入内容 SHA256，用于幂等
   created_at    TEXT NOT NULL,
-  result        TEXT NOT NULL       -- JSON: {created: [path], skipped: bool}
+  result        TEXT NOT NULL       -- JSON: {created: [id], skipped: bool}
 );
 
 CREATE VIRTUAL TABLE notes_fts USING fts5(
@@ -272,7 +297,8 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   "text": null,
   "image_b64": null,
   "file_b64": "...",
-  "filename": "讲义.pdf"
+  "filename": "讲义.pdf",
+  "force": false              // true 则跳过幂等检查，强制重新处理（见不变量 8）
 }
 ```
 → `202 { "job_id": "01J8X..." }`
@@ -287,9 +313,13 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   "stage": "写入",              // 解析 | 拆分 | 分类 | 写入
   "created": [NoteRef],
   "inbox":   [NoteRef],
+  "duplicate": false,          // true 表示命中 ingest_log，created/inbox 是已有结果
   "error":   null
 }
 ```
+
+`duplicate: true` 时**不是错误**:输入此前处理过,返回的是当时的结果。要重新处理就带
+`force: true` 重发(见不变量 8)。
 
 ### `GET /api/search?q=&category=&tag=&include_inbox=false&limit=20`
 
@@ -298,6 +328,15 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 ```
 
 `include_inbox` 默认 `false`。为 `true` 时 `status=inbox` 的笔记参与召回,且必须排在所有 `active` 笔记之后。
+
+**`matched_category` 是查询理解,不是查询参数回显。** 定义:把 `q` 与 taxonomy 的叶子路径、
+叶子 `label`、一级分类名做**大小写不敏感精确匹配**(与不变量 12 同一套规则),命中则填该分类
+路径,否则 `null`。
+
+- 它**不参与 `results` 的排序**,是与 results 并列的第四路结果。
+- 用途:供前端提示「打开这个分类的 MOC」。用户搜「RAG」时,除了命中的笔记,还应该能一步
+  跳到 `ai-engineering/rag` 的索引页。
+- 它**不是**把请求里的 `category` 参数原样回显。
 
 ### `GET /api/notes/{path}` → `{ "frontmatter": {...}, "body": "..." }`
 
@@ -318,6 +357,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 ```jsonc
 {
+  "id": "01JQ8ZK3M7F2VYB4N6R9T0XC5E",   // null 表示 Obsidian 手建、无 id 的笔记
   "path": "notes/角动量算符的对易关系.md",
   "title": "角动量算符的对易关系",
   "category": "physics/quantum-mechanics",
@@ -337,15 +377,31 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 违反任何一条即为 bug,不是风格问题。
 
-1. **所有 vault 读写必须经过 `backend/app/vault/`。** 其他任何位置出现 `open()` 或 `Path.write_text()` 操作 vault 都是违规
+1. **所有对 `notes/`、`inbox/`、`taxonomy.yaml`、`maps/`、`assets/`、`.noteagent/proposals.yaml` 的读写必须经过 `backend/app/vault/`。** 其他任何位置出现 `open()` 或 `Path.write_text()` 操作这些路径都是违规。
+   `.noteagent/index.db` 是派生物,由 `app/search/` 管理,但其路径必须从 `VaultStore` 取得。
+   **注意:豁免的是 `index.db` 这个派生物,不是 `.noteagent/` 这个目录。** `proposals.yaml`
+   删了不能重建,它不在豁免范围内
 2. 所有文件 IO 显式 `encoding="utf-8"`,路径一律 `pathlib.Path`
 3. **分类只能由一批笔记的聚类产生,不能由单条笔记产生。** 录入循环遇到装不下的 → 落 inbox + 填 `suggested_domain`;新建分类一律走 `proposals.yaml` 并经人工确认
 4. `tags` 中不在受控词表的项**直接丢弃**,不新建
 5. **录入循环只能创建新文件**,不得修改或删除已有笔记
-6. `maps/` 全部由程序生成,任何手写内容会在下次重建时丢失
+6. `maps/` 全部由程序生成,任何手写内容会在下次重建时丢失。
+   **`maps/` 下每个 MOC 文件顶部必须有一行提示:「本文件由程序生成,手动修改会在下次重建时丢失。」**
+   ——用户在 Obsidian 里看不到本契约文档,唯一能看到的警告就是文件里这一行
 7. 每次成功写入以一次 `git commit` 结尾,message 格式:`note: 新建 3 条 (来源 screenshot)`
-8. `ingest` 前先算输入 SHA256,命中 `ingest_log` 直接返回已有结果,不重复处理
+8. **幂等。** hash 在 `POST /api/ingest` 的 API 边界计算,输入为 `sha256(kind + "\0" + (text or file_bytes))`。
+   **filename 不进 hash**——内容相同即同一次输入。
+   命中 `ingest_log` 时**不静默跳过**:返回已有结果并置 `duplicate: true`,由用户决定是否带
+   `force: true` 重发;`force` 请求跳过幂等检查。
+   命中时须校验 `result` 里的 id 仍存在于索引中,**全部失效则删除该条 `ingest_log` 记录**(笔记已被
+   用户在 Obsidian 里删掉,这次应该当新输入处理)。
+   理由:`kind=generated` 的输入是用户原话(如「记录量子力学角动量」),用户隔一段时间故意重发是
+   正常行为,那时 taxonomy 已经不同,应该产出不同结果,而不是被静默挡回
 9. 写笔记文件用「先写临时文件再原子 rename」,不允许原地半写
-10. `confidence < 0.6` → 强制 `inbox`(阈值待 eval 校准后确定)
+10. `confidence < 0.6` → 强制 `inbox`。阈值定义在 `app/config.py`,**单一阈值 0.6**,待 eval 校准。
+    触发时 `status` 置 `inbox`,`category` **保留不清空**(见 §2.2「inbox 的两种成因」),
+    `suggested_domain` 保持 `null`
 11. 任何来源的笔记**创建时** `verified` 必须为 `false`。`verified` 只能由人工操作翻为 `true`,录入循环和整理循环都不得写入 `true`
 12. 精确匹配档(标题、别名)**大小写不敏感**;FTS 档不受此约束
+13. **vault 不是本程序独占的。** 用户会直接在 Obsidian 中编辑、重命名、删除笔记。索引必须能容忍
+    外部修改:**SQLite 索引与磁盘不一致时以磁盘为准。** 任何依赖「只有本程序写过 vault」的逻辑都是错的

@@ -13,6 +13,7 @@ from uuid import uuid4
 import frontmatter as fm_lib
 import yaml
 
+from app.vault.ids import new_ulid
 from app.vault.models import Note, NoteFrontmatter, NoteRef
 
 # Windows 非法文件名字符，见 SCHEMA 2.1
@@ -140,9 +141,14 @@ class VaultStore:
 
         不变量 11：任何来源创建时 verified 一律 false，传入值被忽略，
         只有人工编辑文件才能翻为 true。
+
+        id 同样是创建时语义：一律在这里生成，忽略调用方传入的值。放在写入层而不是
+        模型层，是因为模型层的 default_factory 会在解析时也触发——读一篇 Obsidian
+        手建的、没有 id 键的笔记，会被当场捏一个新 id，读两次还不一样（SCHEMA 2.2）。
         """
-        if note.frontmatter.verified:
-            note.frontmatter = note.frontmatter.model_copy(update={"verified": False})
+        note.frontmatter = note.frontmatter.model_copy(
+            update={"verified": False, "id": new_ulid()}
+        )
         fm = note.frontmatter
         directory = self.inbox_dir if fm.status == "inbox" else self.notes_dir
         stem = sanitize_filename(fm.title)

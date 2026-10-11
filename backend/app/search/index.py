@@ -17,6 +17,7 @@ from app.vault.store import VaultStore
 _SCHEMA_SQL = """
 CREATE TABLE notes (
   path              TEXT PRIMARY KEY,   -- 相对 vault 根
+  id                TEXT UNIQUE,        -- 26 字符 ULID，可空：UNIQUE 允许多个 NULL
   title             TEXT NOT NULL,
   category          TEXT,
   suggested_domain  TEXT,
@@ -33,7 +34,7 @@ CREATE TABLE notes (
 CREATE TABLE ingest_log (
   input_hash    TEXT PRIMARY KEY,   -- 输入内容 SHA256，用于幂等
   created_at    TEXT NOT NULL,
-  result        TEXT NOT NULL       -- JSON: {created: [path], skipped: bool}
+  result        TEXT NOT NULL       -- JSON: {created: [id], skipped: bool}
 );
 
 CREATE VIRTUAL TABLE notes_fts USING fts5(
@@ -98,11 +99,12 @@ class SearchIndex:
         conn.execute("DELETE FROM notes WHERE path = ?", (path,))
         conn.execute(
             "INSERT INTO notes"
-            " (path, title, category, suggested_domain, tags, aliases, summary, status,"
+            " (path, id, title, category, suggested_domain, tags, aliases, summary, status,"
             "  verified, confidence, content_hash, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
+                fm.id,
                 fm.title,
                 fm.category,
                 fm.suggested_domain,
