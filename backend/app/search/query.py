@@ -7,6 +7,7 @@ NoteRef 完全从索引构造，不回读笔记文件（SCHEMA 第 4 节）。
 """
 
 import json
+import re
 import sqlite3
 
 from app.search.index import SearchIndex
@@ -70,6 +71,70 @@ def list_inbox(index: SearchIndex) -> list[NoteRef]:
             f"SELECT {_ROW_COLUMNS} FROM notes WHERE status = 'inbox' ORDER BY updated DESC"
         )
         return [_to_ref(row) for row in _dict_rows(cursor)]
+
+
+def retrieve_for_question(index: SearchIndex, question: str, limit: int = 5) -> list[NoteRef]:
+    """给问答用的召回：输入是一句自然语言问题，不是关键词。
+
+    search() 把 q 当整句短语去匹配，问句几乎必然零命中，所以这里换一套：
+    ① 问题里**包含**某条笔记的标题/别名（反向包含）② 把问题切成三字片段做 FTS OR 查询。
+    inbox 笔记照常参与（冷启动时所有笔记都在 inbox），只排除 archived。
+    """
+    question = (question or "").strip()
+    if not question:
+        return []
+    hits: dict[str, tuple[int, float]] = {}
+    with index.connect() as conn:
+        for (path,) in conn.execute(
+            "SELECT path FROM notes"
+            " WHERE length(title) >= 2 AND instr(lower(?), lower(title)) > 0",
+            (question,),
+        ):
+            _better(hits, path, _RANK_TITLE_EXACT, 0.0)
+        for (path,) in conn.execute(
+            "SELECT DISTINCT notes.path FROM notes, json_each(notes.aliases)"
+            " WHERE length(json_each.value) >= 2"
+            " AND instr(lower(?), lower(json_each.value)) > 0",
+            (question,),
+        ):
+            _better(hits, path, _RANK_ALIAS_EXACT, 0.0)
+        terms = _question_terms(question)
+        if terms:
+            match = " OR ".join(f'"{t}"' for t in terms)
+            for path, score in conn.execute(
+                "SELECT path, bm25(notes_fts) FROM notes_fts WHERE notes_fts MATCH ?"
+                " ORDER BY bm25(notes_fts) LIMIT ?",
+                (match, _QUESTION_FTS_CANDIDATES),
+            ):
+                _better(hits, path, _RANK_FTS, score)
+        rows = _fetch_rows(conn, list(hits))
+
+    scored = [
+        ((rank, score, path), _to_ref(rows[path]))
+        for path, (rank, score) in hits.items()
+        if path in rows and rows[path]["status"] != "archived"
+    ]
+    scored.sort(key=lambda item: item[0])
+    return [ref for _key, ref in scored[:limit]]
+
+
+_QUESTION_FTS_CANDIDATES = 50
+_QUESTION_MAX_TERMS = 60
+# ASCII 词整段保留；其余文字（中文等）连续段切三字滑窗。标点和空白是分隔符
+_QUESTION_RUNS = re.compile(r"[A-Za-z0-9]+|[^\W\dA-Za-z_]+")
+
+
+def _question_terms(question: str) -> list[str]:
+    """trigram 分词器至少要 3 个字符才能匹配，更短的片段直接丢弃。"""
+    terms: list[str] = []
+    for run in _QUESTION_RUNS.findall(question):
+        if len(run) < 3:
+            continue
+        pieces = [run] if run.isascii() else [run[i : i + 3] for i in range(len(run) - 2)]
+        for piece in pieces:
+            if piece not in terms:
+                terms.append(piece)
+    return terms[:_QUESTION_MAX_TERMS]
 
 
 def refs_by_ids(index: SearchIndex, ids: list[str]) -> list[NoteRef]:

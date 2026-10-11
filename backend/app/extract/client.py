@@ -43,6 +43,11 @@ def get_classify_model(override: str | None = None):
     return _build(_resolve_model(override, config.CLASSIFY_MODEL, "CLASSIFY_MODEL"))
 
 
+def get_answer_model(override: str | None = None):
+    """问答模型(ANSWER_MODEL,未配置时沿用 CLASSIFY_MODEL)。"""
+    return _build(_resolve_model(override, config.ANSWER_MODEL, "ANSWER_MODEL"))
+
+
 def bind_structured(model, schema):
     """统一挂结构化输出:method 取自 config.STRUCTURED_OUTPUT_METHOD,始终 include_raw
     以便读 usage_metadata 和在失败时看清模型实际返回。"""

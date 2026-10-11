@@ -5,8 +5,9 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
+from app.ask.answer import AskResult, answer_question
 from app.config import default_vault_root
 from app.ingest.jobs import JobRegistry, JobState
 from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
@@ -26,6 +27,18 @@ class IngestRequest(BaseModel):
     file_b64: str | None = None
     filename: str | None = None
     force: bool = False
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+    limit: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("question")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("question 不能为空白")
+        return v.strip()
 
 
 def _parse_ingest(req: IngestRequest) -> tuple[str | None, bytes | None]:
@@ -137,6 +150,14 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             index, q, category=category, tag=tag, include_inbox=include_inbox, limit=limit
         )
         return {"results": results, "matched_category": taxonomy.match_category(q)}
+
+    @app.post("/api/ask")
+    def api_ask(req: AskRequest) -> AskResult:
+        try:
+            return answer_question(store, index, req.question, limit=req.limit)
+        except Exception as exc:
+            logger.exception("问答失败")
+            raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}")
 
     @app.get("/api/inbox")
     def api_inbox() -> list[NoteRef]:

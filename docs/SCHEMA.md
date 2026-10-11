@@ -345,6 +345,27 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   跳到 `ai-engineering/rag` 的索引页。
 - 它**不是**把请求里的 `category` 参数原样回显。
 
+### `POST /api/ask`
+
+```jsonc
+{ "question": "RAG 和微调有什么区别？", "limit": 5 }   // question 1–500 字；limit 1–10，默认 5
+```
+→
+```jsonc
+{
+  "answer": "RAG 在生成前先检索…… [1]。微调则…… [2]。",
+  "sources": [NoteRef],        // 顺序即引用编号：sources[0] 对应回答里的 [1]
+  "grounded": true             // false 表示没检索到任何笔记，回答完全来自模型自身知识
+}
+```
+
+- 检索**包含 inbox 笔记**(冷启动时所有笔记都在 inbox),只排除 `archived`。
+- 召回方式与 `/api/search` 不同:问题里**包含**某条笔记的标题或别名即命中,其次把问题切成三字片段做全文检索。
+- 笔记正文从磁盘读取;索引里有但磁盘上已不存在的笔记直接跳过(不变量 13)。
+- 模型自身知识的补充必须单独成段并以「以下为模型补充,非知识库内容:」开头——与 §2.3 `## 待核实`
+  同一个理由:模型生成的内容不能和你自己记的内容长得一样。
+- 模型调用失败返回 `502`。问答模型读环境变量 `ANSWER_MODEL`,未配置时沿用 `CLASSIFY_MODEL`。
+
 ### `GET /api/notes/{path}` → `{ "frontmatter": {...}, "body": "..." }`
 
 ### `GET /api/taxonomy` → taxonomy.yaml 的解析结果

@@ -26,6 +26,8 @@ ZHIPU_API_KEY: str | None = os.environ.get("ZHIPU_API_KEY")
 GLM_BASE_URL: str = os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
 EXTRACT_MODEL: str | None = os.environ.get("EXTRACT_MODEL")
 CLASSIFY_MODEL: str | None = os.environ.get("CLASSIFY_MODEL")
+# 问答模型。未配置（或留空）时沿用 CLASSIFY_MODEL
+ANSWER_MODEL: str | None = os.environ.get("ANSWER_MODEL") or CLASSIFY_MODEL
 # 结构化输出方式:function_calling | json_mode。GLM 对两者支持不一,撞墙时改 .env 即可
 STRUCTURED_OUTPUT_METHOD: str = os.environ.get("STRUCTURED_OUTPUT_METHOD", "function_calling")
 
