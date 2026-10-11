@@ -1,18 +1,46 @@
-"""草稿 + 归类结果 → Note。纯函数，不读写 vault；正文结构见 SCHEMA 2.3。"""
+"""草稿 + 归类结果 → Note。纯函数，不读写 vault；两种笔记的正文结构见 SCHEMA 2.3。"""
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import datetime
 
-from app.extract.models import NoteDraft
+from app.extract.models import NoteDraft, TopicDraft
 from app.organize.service import placement_status
-from app.vault.models import Note, NoteFrontmatter, SourceKind, SourceRef
+from app.vault.models import Note, NoteFrontmatter, NoteType, SourceKind, SourceRef
 from app.vault.store import sanitize_filename
 
 _EMPTY_RELATED = "（暂无）"
 _TEXT_REF_CHARS = 100
+# 「模型补充」区块固定的第一行（SCHEMA 不变量 14）：模型自己的知识不能和使用者的资料长得一样
+SUPPLEMENT_HEADING = "## 模型补充"
+SUPPLEMENT_MARKER = "> 以下内容由模型根据自身知识补充，不是来自你的资料。"
 
 
-def assemble_note(
+def assemble_topic(
+    topic: TopicDraft,
+    *,
+    category: str | None,
+    confidence: float,
+    kind: SourceKind,
+    asset_path: str | None = None,
+    text: str | None = None,
+    concept_stems: Sequence[str] = (),
+    now: datetime | None = None,
+) -> Note:
+    """主题笔记：保留原结构的内容、本次一起产出的概念笔记、模型补充、原始输入。
+
+    concept_stems 是那些概念笔记**实际落盘**的文件名（不含 .md），由调用方在建完它们之后传入。
+    """
+    source, original = _source(kind, asset_path, text)
+    sections = [f"## 内容\n{topic.content}"]
+    if concept_stems:
+        sections.append("## 概念\n" + "\n".join(f"- [[{stem}]]" for stem in concept_stems))
+    if topic.supplement:
+        sections.append(_supplement_block(topic.supplement))
+    sections.append(f"## 原始输入\n{original}")
+    return _note("topic", topic.title, topic.summary, [], sections, category, confidence, source, now)
+
+
+def assemble_concept(
     draft: NoteDraft,
     *,
     category: str | None,
@@ -20,38 +48,61 @@ def assemble_note(
     kind: SourceKind,
     asset_path: str | None = None,
     text: str | None = None,
+    topic_stem: str | None = None,
     link_targets: Collection[str] = (),
     now: datetime | None = None,
 ) -> Note:
-    """link_targets 是「真实存在或本批即将创建」的笔记文件名（不含 .md），
-    related 里对不上的概念不写链接。category 为 None 或置信度不够时进待整理。
-    id 留给 store.create_note 定。"""
+    """概念笔记：要点、模型补充、关联。
+
+    topic_stem 是它出自的主题笔记的文件名；有主题笔记时原始输入只放在主题笔记里，
+    没有时（输入只讲一个概念）放在这条的末尾。link_targets 是「真实存在或本批即将创建」
+    的笔记文件名，related 里对不上的概念不写链接。
+    """
     source, original = _source(kind, asset_path, text)
+    sections = ["## 要点\n" + "\n".join(f"- {p}" for p in draft.points)]
+    if draft.supplement:
+        sections.append(_supplement_block("\n".join(f"- {s}" for s in draft.supplement)))
+    sections.append("## 关联\n" + _related_block(draft, topic_stem, link_targets))
+    if topic_stem is None:
+        sections.append(f"## 原始输入\n{original}")
+    return _note(
+        "concept", draft.title, draft.summary, draft.aliases, sections, category, confidence, source, now
+    )
+
+
+def _note(
+    note_type: NoteType,
+    title: str,
+    summary: str,
+    aliases: list[str],
+    sections: list[str],
+    category: str | None,
+    confidence: float,
+    source: SourceRef,
+    now: datetime | None,
+) -> Note:
+    """category 为 None 或置信度不够时进待整理。id 留给 store.create_note 定。"""
     status, confidence = placement_status(category, confidence)
     stamp = now if now is not None else datetime.now().astimezone()
-
-    body = "\n\n".join(
-        [
-            f"## 一句话\n{draft.summary}",
-            "## 要点\n" + "\n".join(f"- {p}" for p in draft.points),
-            "## 关联\n" + _related_block(draft, link_targets),
-            f"## 原始输入\n{original}",
-        ]
-    )
     return Note(
         frontmatter=NoteFrontmatter(
-            title=draft.title,
+            type=note_type,
+            title=title,
             category=category,
-            aliases=draft.aliases,
-            summary=draft.summary,
+            aliases=aliases,
+            summary=summary,
             status=status,
             confidence=confidence,
             created=stamp,
             updated=stamp,
             source=source,
         ),
-        body=body + "\n",
+        body="\n\n".join(sections) + "\n",
     )
+
+
+def _supplement_block(content: str) -> str:
+    return f"{SUPPLEMENT_HEADING}\n{SUPPLEMENT_MARKER}\n\n{content}"
 
 
 def _source(kind: SourceKind, asset_path: str | None, text: str | None) -> tuple[SourceRef, str]:
@@ -68,11 +119,12 @@ def _source(kind: SourceKind, asset_path: str | None, text: str | None) -> tuple
     raise ValueError(f"暂不支持的来源: {kind}")
 
 
-def _related_block(draft: NoteDraft, link_targets: Collection[str]) -> str:
-    # Obsidian 链接与 Windows 文件名都不分大小写，按 casefold 对齐后写回真实文件名
+def _related_block(draft: NoteDraft, topic_stem: str | None, link_targets: Collection[str]) -> str:
+    # 链接与 Windows 文件名都不分大小写，按 casefold 对齐后写回真实文件名
     by_key = {stem.casefold(): stem for stem in link_targets}
     own = sanitize_filename(draft.title).casefold()
-    links: list[str] = []
+    # 第一条是它出自的主题笔记
+    links: list[str] = [topic_stem] if topic_stem else []
     for name in draft.related:
         key = sanitize_filename(name).casefold()
         stem = by_key.get(key)

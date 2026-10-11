@@ -23,6 +23,7 @@ _NOTES_SQL = """
 CREATE TABLE notes (
   path              TEXT PRIMARY KEY,   -- 相对 vault 根
   id                TEXT UNIQUE,        -- 26 字符 ULID，可空：UNIQUE 允许多个 NULL
+  type              TEXT NOT NULL,      -- topic | concept
   title             TEXT NOT NULL,
   category          TEXT,               -- 「大块/小块」，可空
   category_locked   INTEGER NOT NULL,   -- 0/1
@@ -31,6 +32,7 @@ CREATE TABLE notes (
   summary           TEXT NOT NULL,
   status            TEXT NOT NULL,
   confidence        REAL NOT NULL,
+  duplicate_of      TEXT,               -- 疑似与之重复的笔记 id，可空
   content_hash      TEXT NOT NULL,
   updated           TEXT NOT NULL
 );
@@ -51,7 +53,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 _SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL
 
 # 记在 PRAGMA user_version 里，与 SCHEMA.md 的版本号一致
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # fts 表里 aliases 的存储分隔符，查询层按它还原成列表做精确匹配
 ALIAS_SEP = "\n"
@@ -119,12 +121,13 @@ class SearchIndex:
         conn.execute("DELETE FROM notes WHERE path = ?", (path,))
         conn.execute(
             "INSERT INTO notes"
-            " (path, id, title, category, category_locked, tags, aliases, summary, status,"
-            "  confidence, content_hash, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " (path, id, type, title, category, category_locked, tags, aliases, summary, status,"
+            "  confidence, duplicate_of, content_hash, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 fm.id,
+                fm.type,
                 fm.title,
                 fm.category,
                 int(fm.category_locked),
@@ -133,6 +136,7 @@ class SearchIndex:
                 fm.summary,
                 fm.status,
                 fm.confidence,
+                fm.duplicate_of,
                 content_hash(note),
                 fm.updated.isoformat(),
             ),

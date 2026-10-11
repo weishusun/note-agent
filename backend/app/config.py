@@ -28,8 +28,6 @@ EXTRACT_MODEL: str | None = os.environ.get("EXTRACT_MODEL")
 CLASSIFY_MODEL: str | None = os.environ.get("CLASSIFY_MODEL")
 # 问答模型。未配置（或留空）时沿用 CLASSIFY_MODEL
 ANSWER_MODEL: str | None = os.environ.get("ANSWER_MODEL") or CLASSIFY_MODEL
-# 结构化输出方式:function_calling | json_mode。GLM 对两者支持不一,撞墙时改 .env 即可
-STRUCTURED_OUTPUT_METHOD: str = os.environ.get("STRUCTURED_OUTPUT_METHOD", "function_calling")
 
 # 分类置信度低于此值的笔记强制落 inbox（SCHEMA 不变量 10）。待 eval 校准
 INBOX_CONFIDENCE_THRESHOLD: float = 0.6

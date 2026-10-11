@@ -8,11 +8,11 @@ from collections.abc import Callable
 
 from app.extract.classifier import NoteBrief
 from app.extract.extractor import _image_mime, extract_drafts
-from app.ingest.assemble import assemble_note
+from app.ingest.assemble import assemble_concept, assemble_topic
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
 from app.vault import git
-from app.vault.models import SourceKind
+from app.vault.models import Note, SourceKind
 from app.vault.store import VaultStore, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -36,18 +36,20 @@ def run_ingest(
     image: bytes | None = None,
     on_stage: Callable[[str], None] = lambda stage: None,
 ) -> list[str]:
-    """处理一次输入，返回新建笔记的 id（顺序与草稿一致）。"""
+    """处理一次输入，返回新建笔记的 id：有主题笔记时它排第一，其后是概念笔记。"""
     started = time.perf_counter()
     on_stage("拆分")
-    drafts, _usage = extract_drafts(image, text)
+    extraction, _usage = extract_drafts(image, text)
+    topic, concepts = extraction.topic, extraction.concepts
     extracted = time.perf_counter()
 
     on_stage("分类")
-    # 这份输入产出的所有草稿在一次调用里一起归类；归类失败不会抛，分不上的进待整理
-    placements = organizer.classify(
-        [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in drafts]
-    )
-
+    # 这份输入产出的所有笔记在一次调用里一起归类；归类失败不会抛，分不上的进待整理
+    briefs = [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in concepts]
+    if topic is not None:
+        briefs.insert(0, NoteBrief(title=topic.title, summary=topic.summary))
+    placements = organizer.classify(briefs)
+    topic_placement = placements.pop(0) if topic is not None else None
     classified = time.perf_counter()
 
     on_stage("写入")
@@ -56,22 +58,50 @@ def run_ingest(
     if image is not None:
         asset_path = store.save_asset(image, _image_mime(image).split("/")[1])
     link_targets = {p.stem for p in store.list_notes(include_inbox=True)}
-    link_targets.update(sanitize_filename(d.title) for d in drafts)
+    link_targets.update(sanitize_filename(d.title) for d in concepts)
 
-    ids: list[str] = []
-    for draft, (category, confidence) in zip(drafts, placements):
-        note = assemble_note(
+    # 两种笔记互相链接：概念笔记要写主题笔记的文件名，主题笔记要写概念笔记的文件名。
+    # 先按「会分配到的文件名」建概念笔记，再用它们实际的文件名建主题笔记
+    topic_stem = store.next_stem(topic.title) if topic is not None else None
+    concept_notes: list[Note] = []
+    for draft, (category, confidence) in zip(concepts, placements):
+        note = assemble_concept(
             draft,
             category=category,
             confidence=confidence,
             kind=kind,
             asset_path=asset_path,
             text=text,
+            topic_stem=topic_stem,
             link_targets=link_targets,
         )
         store.create_note(note)
         index.upsert_note(note)
-        ids.append(note.frontmatter.id)
+        concept_notes.append(note)
+
+    ids = [note.frontmatter.id for note in concept_notes]
+    if topic is not None and topic_placement is not None:
+        note = assemble_topic(
+            topic,
+            category=topic_placement[0],
+            confidence=topic_placement[1],
+            kind=kind,
+            asset_path=asset_path,
+            text=text,
+            concept_stems=[n.path.stem for n in concept_notes if n.path is not None],
+        )
+        actual_stem = store.create_note(note).stem
+        index.upsert_note(note)
+        ids.insert(0, note.frontmatter.id)
+        if actual_stem != topic_stem:
+            # 极少见：两次录入同时进行，预测的文件名被别人占了。把概念笔记里的链接改过来
+            for concept in concept_notes:
+                if concept.path is not None:
+                    fixed = store.rewrite_note(
+                        concept.path,
+                        body=concept.body.replace(f"[[{topic_stem}]]", f"[[{actual_stem}]]"),
+                    )
+                    index.upsert_note(fixed)
 
     # 笔记已落盘，提交失败（如 vault 不是 git 仓库）不应让整次录入算失败
     try:

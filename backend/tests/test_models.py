@@ -30,6 +30,15 @@ def test_frontmatter_tolerates_long_names_on_read() -> None:
     assert make_note(category="一个超过十二个字的很长的大块名字/小块").frontmatter.category
 
 
+def test_summary_limit_and_new_fields_default_for_old_notes() -> None:
+    assert make_note(summary="概" * 80).frontmatter.summary
+    with pytest.raises(ValidationError):
+        make_note(summary="概" * 81)
+    # v4 及以前的笔记没有 type / duplicate_of 两个键
+    fm = make_note().frontmatter
+    assert (fm.type, fm.duplicate_of) == ("concept", None)
+
+
 def test_clean_category_name() -> None:
     assert clean_category_name("  模型训练 ") == "模型训练"
     assert clean_category_name("十二个字的分类名正好十二") == "十二个字的分类名正好十二"

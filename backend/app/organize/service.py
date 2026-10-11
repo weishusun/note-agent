@@ -71,10 +71,12 @@ class Organizer:
     # ---------- 目录树 ----------
 
     def tree(self) -> Tree:
-        total, inbox = status_counts(self.index)
-        return self._tree(category_counts(self.index), total, inbox)
+        total, inbox, duplicates = status_counts(self.index)
+        return self._tree(category_counts(self.index), total, inbox, duplicates)
 
-    def _tree(self, counts: dict[str, int], total: int, inbox: int) -> Tree:
+    def _tree(
+        self, counts: dict[str, int], total: int, inbox: int, duplicates: int = 0
+    ) -> Tree:
         """taxonomy.yaml 里登记的分类，加上笔记上写着但没登记的——两边不一致时
         不能让笔记在界面上消失（SCHEMA /api/tree）。"""
         nodes: dict[str, tuple[bool, dict[str, bool]]] = {
@@ -104,7 +106,7 @@ class Organizer:
                 )
             )
         parents.sort(key=lambda p: (-p.count, p.name))
-        return Tree(total=total, inbox=inbox, categories=parents)
+        return Tree(total=total, inbox=inbox, duplicates=duplicates, categories=parents)
 
     # ---------- 自动归类 ----------
 

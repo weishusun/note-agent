@@ -23,7 +23,6 @@ def env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "GLM_BASE_URL", "https://env.example/v4/")
     monkeypatch.setattr(config, "EXTRACT_MODEL", "env-vision")
     monkeypatch.setattr(config, "CLASSIFY_MODEL", "env-text")
-    monkeypatch.setattr(config, "STRUCTURED_OUTPUT_METHOD", "function_calling")
     monkeypatch.setattr(config, "DISABLE_THINKING", True)
     monkeypatch.delenv("ANSWER_MODEL", raising=False)
 
@@ -58,7 +57,7 @@ def test_defaults_come_from_env() -> None:
         "env-text",
     )
     assert s.answer_model is None and s.effective_answer_model == "env-text"
-    assert (s.disable_thinking, s.extract_disable_thinking) == (True, False)
+    assert (s.disable_thinking, s.extract_disable_thinking) == (True, True)
 
 
 def test_saved_values_override_env_and_blank_falls_back(isolated_settings: Path) -> None:
@@ -89,7 +88,6 @@ def test_get_settings_never_returns_the_key(client: TestClient) -> None:
         "extract_model",
         "classify_model",
         "answer_model",
-        "structured_output_method",
         "disable_thinking",
         "extract_disable_thinking",
     }
@@ -108,7 +106,6 @@ def test_put_settings_saves_and_masks(client: TestClient, isolated_settings: Pat
             "extract_model": "vision-x",
             "classify_model": "text-x",
             "answer_model": "answer-x",
-            "structured_output_method": "json_mode",
             "disable_thinking": False,
             "extract_disable_thinking": True,
         },
@@ -123,7 +120,7 @@ def test_put_settings_saves_and_masks(client: TestClient, isolated_settings: Pat
         "text-x",
         "answer-x",
     )
-    assert (data["structured_output_method"], data["disable_thinking"]) == ("json_mode", False)
+    assert data["disable_thinking"] is False
     assert data["extract_disable_thinking"] is True
 
     assert settings.load().api_key == "new-key-abcdWXYZ"
@@ -150,7 +147,7 @@ def test_short_key_gets_no_hint(client: TestClient) -> None:
     [
         {"base_url": "ftp://example.com"},
         {"base_url": "open.bigmodel.cn/api"},
-        {"structured_output_method": "xml"},
+        {"structured_output_method": "json_mode"},  # 这个设置已经删除
         {"unknown_field": 1},
     ],
 )
@@ -187,10 +184,10 @@ def test_models_are_built_from_current_settings(built: list[dict]) -> None:
     assert {c["base_url"] for c in built} == {"https://other.example/v1"}
     assert {c["api_key"] for c in built} == {"file-key-99990000"}
     assert [c["model"] for c in built] == ["env-vision", "env-text", "env-text", "env-text"]
-    # 小调用关闭思考；提取和问答保持开启
+    # 提取和各种小调用默认关闭思考；问答保持开启（回答质量是使用者直接看到的）
     no_thinking = {"thinking": {"type": "disabled"}}
-    assert (classify["extra_body"], expand["extra_body"]) == (no_thinking, no_thinking)
-    assert (extract["extra_body"], answer["extra_body"]) == (None, None)
+    assert [c["extra_body"] for c in (extract, classify, expand)] == [no_thinking] * 3
+    assert answer["extra_body"] is None
     # 扩展超时短且不重试；其余都有超时
     assert (expand["timeout"], expand["max_retries"]) == (10.0, 0)
     assert all(c["timeout"] for c in built)
@@ -219,30 +216,18 @@ def test_missing_key_or_model_gives_readable_error(
     assert built == []
 
 
-def test_extract_switches_to_json_mode_when_thinking_is_off(built: list[dict]) -> None:
-    """关闭思考后 function calling 不可用：提取必须改走 json_mode，且提示词里写明输出结构。"""
-    assert model_client.extract_uses_json_mode() is False
-    assert "输出格式" not in extractor._extract_messages(None, "一段文字")[0].content
-
-    settings.save({"extract_disable_thinking": True})
-
-    assert model_client.extract_uses_json_mode() is True
-    system = extractor._extract_messages(None, "一段文字")[0].content
-    assert '{"drafts": [' in system
+def test_extract_thinking_can_be_turned_back_on(built: list[dict]) -> None:
+    """提取默认关闭思考；打开只影响思考参数，输出方式始终是 json_mode。"""
     model_client.get_extract_model()
-    assert built[-1]["extra_body"] == {"thinking": {"type": "disabled"}}
+    settings.save({"extract_disable_thinking": False})
+    model_client.get_extract_model()
+    assert [c["extra_body"] for c in built] == [{"thinking": {"type": "disabled"}}, None]
 
     bound: dict = {}
     fake = SimpleNamespace(with_structured_output=lambda schema, **kw: bound.update(kw))
-    model_client.bind_structured(fake, extractor._DraftBatch)
+    model_client.bind_json(fake, extractor._DraftBatch)
     assert bound == {"method": "json_mode", "include_raw": True}
-
-
-def test_structured_output_method_json_mode_also_adds_format(built: list[dict]) -> None:
-    settings.save({"structured_output_method": "json_mode"})
-    assert model_client.extract_uses_json_mode() is True
-    model_client.get_extract_model()
-    assert built[-1]["extra_body"] is None  # 只换输出方式，不关思考
+    assert '"concepts": [' in extractor._extract_messages(None, "一段文字")[0].content
 
 
 def test_probe_png_is_a_valid_image() -> None:

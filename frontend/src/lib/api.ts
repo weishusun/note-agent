@@ -2,6 +2,8 @@
 
 export interface NoteRef {
   id: string | null
+  // 主题笔记保留一份输入的整体结构；概念笔记是一个值得单独查到的概念
+  type: "topic" | "concept"
   path: string
   title: string
   // 「大块/小块」。待整理的笔记这里是模型的猜测，也可能是 null
@@ -10,6 +12,8 @@ export interface NoteRef {
   tags: string[]
   summary: string
   status: "active" | "inbox" | "archived"
+  // 疑似与之重复的那条已有笔记的 id
+  duplicate_of: string | null
   updated: string
   confidence: number
 }
@@ -37,7 +41,9 @@ export interface AskResult {
 export interface NoteDetail {
   frontmatter: {
     id: string | null
+    type: NoteRef["type"]
     title: string
+    summary: string
     category: string | null
     category_locked: boolean
     aliases: string[]
@@ -65,6 +71,7 @@ export interface TreeParent {
 export interface Tree {
   total: number
   inbox: number
+  duplicates: number
   categories: TreeParent[]
 }
 
@@ -75,7 +82,6 @@ export interface SettingsView {
   extract_model: string
   classify_model: string
   answer_model: string
-  structured_output_method: "function_calling" | "json_mode"
   disable_thinking: boolean
   extract_disable_thinking: boolean
 }

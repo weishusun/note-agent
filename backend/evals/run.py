@@ -103,7 +103,8 @@ def process(
     out: list[tuple[Fixture, ExtractResult]] = []
 
     for fx in fixtures:
-        drafts, usage = extract_drafts(fx.image, fx.text, override=extract_model)
+        extraction, usage = extract_drafts(fx.image, fx.text, override=extract_model)
+        drafts = extraction.concepts  # 只评概念笔记；主题笔记不参与归类一致性的统计
         # 本样本只能看到「它之前」累积出来的分类树
         placements = classify_notes(
             [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in drafts],

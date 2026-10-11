@@ -8,14 +8,11 @@ settings.json 里有密钥，已在 .gitignore 中忽略；它不放在 vault �
 import json
 import os
 from pathlib import Path
-from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
 from app import config
-
-StructuredMethod = Literal["function_calling", "json_mode"]
 
 
 class Settings(BaseModel):
@@ -27,10 +24,10 @@ class Settings(BaseModel):
     classify_model: str | None
     # 留空则沿用 classify_model
     answer_model: str | None
-    structured_output_method: StructuredMethod
     # 分类、压缩、检索词扩展这类小调用是否关闭思考（智谱专有参数）
     disable_thinking: bool
-    # 看图提取是否也关闭思考：快 5-10 倍，但实测会漏掉截图里表格之外的段落，默认不关
+    # 看图提取是否也关闭思考，默认关。实测开着思考一张图要 100 秒以上，还会把无关紧要的东西
+    # 也建成概念笔记；关掉后 5–40 秒，内容由主题笔记完整兜住
     extract_disable_thinking: bool
 
     @property
@@ -50,9 +47,8 @@ def _env_defaults() -> dict:
         "extract_model": config.EXTRACT_MODEL,
         "classify_model": config.CLASSIFY_MODEL,
         "answer_model": os.environ.get("ANSWER_MODEL") or None,
-        "structured_output_method": config.STRUCTURED_OUTPUT_METHOD,
         "disable_thinking": config.DISABLE_THINKING,
-        "extract_disable_thinking": False,
+        "extract_disable_thinking": True,
     }
 
 

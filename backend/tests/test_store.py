@@ -203,3 +203,26 @@ def test_no_leftover_tmp_files(store: VaultStore) -> None:
     store.save_asset(b"\x89PNG", "png")
     leftovers = list(store.root.rglob("*.tmp"))
     assert leftovers == []
+
+
+def test_next_stem_predicts_what_create_note_will_use(store: VaultStore) -> None:
+    assert store.next_stem("RAG 检索增强生成") == "RAG 检索增强生成"
+    assert store.next_stem("问: A/B?") == "问 AB"
+
+    store.create_note(make_note())
+    (store.inbox_dir / "RAG 检索增强生成 (2).md").write_text("旧目录里的同名文件", encoding="utf-8")
+
+    predicted = store.next_stem("RAG 检索增强生成")
+    assert predicted == "RAG 检索增强生成 (3)"
+    assert store.create_note(make_note()).stem == predicted  # 只看不占，随后真的拿到它
+
+
+def test_rewrite_note_replaces_body_in_place(store: VaultStore) -> None:
+    rel = store.create_note(make_note())
+    before = store.read_note(rel)
+
+    after = store.rewrite_note(rel, body="## 要点\n- 改过的正文\n", summary="改过的概要。")
+
+    assert after.path == rel and after.frontmatter.id == before.frontmatter.id
+    read = store.read_note(rel)
+    assert (read.body.strip(), read.frontmatter.summary) == ("## 要点\n- 改过的正文", "改过的概要。")

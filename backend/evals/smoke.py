@@ -19,7 +19,7 @@ import time
 
 from app import config
 from app.extract.classifier import NoteBrief, classify_notes
-from app.extract.client import bind_structured, get_extract_model
+from app.extract.client import bind_json, get_extract_model
 from app.extract.extractor import _DraftBatch, _extract_messages, _image_mime
 from app.vault.models import Tree
 
@@ -115,7 +115,6 @@ def main() -> None:
     print(f"  base_url                 : {config.GLM_BASE_URL}")
     print(f"  EXTRACT_MODEL            : {config.EXTRACT_MODEL}")
     print(f"  CLASSIFY_MODEL           : {config.CLASSIFY_MODEL}")
-    print(f"  STRUCTURED_OUTPUT_METHOD : {config.STRUCTURED_OUTPUT_METHOD}")
     print(f"  ZHIPU_API_KEY            : {_mask(config.ZHIPU_API_KEY)}")
     print(f"  .env                     : {config.ENV_PATH}")
     config.require_api_key()  # 缺 key 立刻可读报错,不拖到 401
@@ -134,11 +133,14 @@ def main() -> None:
     # [3][4] extract
     print("\n[3] extract 原始响应")
     ext_model = get_extract_model()
-    ext_runnable = bind_structured(ext_model, _DraftBatch)
+    ext_runnable = bind_json(ext_model, _DraftBatch)
     ext_out = _invoke_verbose(ext_runnable, _extract_messages(image, text), "extract")
     print(_raw_dump(ext_out["raw"]))
     _acc_usage(usage, ext_out["raw"])
-    drafts = ext_out["parsed"].drafts
+    topic = ext_out["parsed"].topic
+    print("[4a] 主题笔记")
+    print(_pretty(topic) if topic is not None else "  (无:输入只讲一个概念)")
+    drafts = ext_out["parsed"].concepts
 
     print("\n[4] 解析后的 NoteDraft")
     print(f"  共 {len(drafts)} 条")

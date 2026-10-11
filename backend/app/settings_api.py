@@ -19,7 +19,6 @@ class SettingsView(BaseModel):
     extract_model: str
     classify_model: str
     answer_model: str
-    structured_output_method: settings.StructuredMethod
     disable_thinking: bool
     extract_disable_thinking: bool
 
@@ -34,7 +33,6 @@ class SettingsUpdate(BaseModel):
     extract_model: str | None = None
     classify_model: str | None = None
     answer_model: str | None = None
-    structured_output_method: settings.StructuredMethod | None = None
     disable_thinking: bool | None = None
     extract_disable_thinking: bool | None = None
 
@@ -60,7 +58,6 @@ def _view(current: settings.Settings) -> SettingsView:
         extract_model=current.extract_model or "",
         classify_model=current.classify_model or "",
         answer_model=current.answer_model or "",
-        structured_output_method=current.structured_output_method,
         disable_thinking=current.disable_thinking,
         extract_disable_thinking=current.extract_disable_thinking,
     )

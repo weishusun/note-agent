@@ -364,7 +364,7 @@ def categorized(store: VaultStore, index: SearchIndex) -> dict[str, str]:
 
 def test_category_counts_only_count_active(categorized: dict, index: SearchIndex) -> None:
     assert category_counts(index) == {"AI工程/RAG": 2, "计算机基础/算法": 1}
-    assert status_counts(index) == (4, 1)
+    assert status_counts(index) == (4, 1, 0)
     # 待整理笔记上模型猜的分类也算「在用」，清理空分类时不能把它删了
     assert categories_in_use(index) == {"AI工程/RAG", "计算机基础/算法", "AI工程/Agent"}
 

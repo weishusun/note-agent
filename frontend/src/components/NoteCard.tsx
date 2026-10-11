@@ -20,7 +20,14 @@ export function NoteCard({
     >
       {badge}
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium">{note.title}</span>
+        <span className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium">{note.title}</span>
+          {note.type === "topic" && (
+            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+              主题
+            </span>
+          )}
+        </span>
         <span className="mt-0.5 block text-sm text-muted-foreground">{note.summary}</span>
         <span className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground">
           {placement(note)}

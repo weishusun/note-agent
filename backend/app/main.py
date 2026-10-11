@@ -187,9 +187,12 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     def api_notes(
         category: str | None = None,
         status: Literal["inbox"] | None = None,
+        duplicates: bool = False,
         limit: int = Query(default=50, ge=1, le=200),
     ) -> list[NoteRef]:
-        return list_recent(index, limit, category=category, status=status)
+        return list_recent(
+            index, limit, category=category, status=status, duplicates=duplicates
+        )
 
     @app.post("/api/reindex")
     def api_reindex() -> dict[str, int]:

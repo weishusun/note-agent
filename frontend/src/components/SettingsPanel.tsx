@@ -17,7 +17,6 @@ function toForm(view: SettingsView): Form {
     extract_model: view.extract_model,
     classify_model: view.classify_model,
     answer_model: view.answer_model,
-    structured_output_method: view.structured_output_method,
     disable_thinking: view.disable_thinking,
     extract_disable_thinking: view.extract_disable_thinking,
   }
@@ -173,26 +172,11 @@ export function SettingsPanel({ active }: { active: boolean }) {
           onChange={(v) => set("disable_thinking", v)}
         />
         <Check
-          label="提取时也关闭思考模式"
-          hint="截图录入快 5 到 10 倍，但实测会漏掉截图里的部分内容，默认不开。"
+          label="看图提取时关闭思考模式"
+          hint="默认勾选。取消后模型会先思考再输出，一张截图要 100 秒以上，实测内容并没有更完整。"
           checked={form.extract_disable_thinking}
           onChange={(v) => set("extract_disable_thinking", v)}
         />
-        <Field label="提取的结构化输出方式" hint="录入时报不支持 tools 之类的错误，就换成 JSON 模式。">
-          {(id) => (
-            <select
-              id={id}
-              className={INPUT}
-              value={form.structured_output_method}
-              onChange={(e) =>
-                set("structured_output_method", e.target.value as Form["structured_output_method"])
-              }
-            >
-              <option value="function_calling">函数调用</option>
-              <option value="json_mode">JSON 模式</option>
-            </select>
-          )}
-        </Field>
       </fieldset>
 
       <div className="flex items-center gap-3">

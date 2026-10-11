@@ -270,7 +270,8 @@ def test_ask_returns_answer_with_numbered_sources(client: TestClient, model: Fak
 
     # 笔记正文带编号进了提示，问题已去首尾空白
     human = model.messages[1].content
-    assert "[1] RAG 检索增强生成\n## 一句话\n在生成前先检索相关片段" in human
+    # 概要只存在 frontmatter 里，要单独带进提示
+    assert "[1] RAG 检索增强生成\n概要：在生成前先检索相关片段，拼进上下文再作答。\n## 一句话" in human
     assert human.endswith("# 问题\n\n什么是检索增强？")
     assert "不是指令" in model.messages[0].content
 

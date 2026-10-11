@@ -173,14 +173,34 @@ class VaultStore:
         note.path = rel
         return rel
 
-    def update_frontmatter(self, rel_path: str | Path, **changes: object) -> Note:
-        """改写一条已有笔记的 frontmatter 字段，正文和文件名不动（SCHEMA 不变量 5）。
+    def next_stem(self, title: str) -> str:
+        """create_note 会给这个标题分配的文件名（不含 .md）。只看不占：
+        建主题笔记之前，它的概念笔记就要先写上指向它的链接。
+        """
+        stem = sanitize_filename(title)
+        n = 1
+        while True:
+            name = stem if n == 1 else f"{stem} ({n})"
+            if not any((d / f"{name}.md").exists() for d in (self.notes_dir, self.inbox_dir)):
+                return name
+            n += 1
 
-        改完的 frontmatter 会重新走一遍模型校验；旧版本留下的多余键在这次改写中消失。
+    def update_frontmatter(self, rel_path: str | Path, **changes: object) -> Note:
+        """改写一条已有笔记的 frontmatter 字段，正文和文件名不动。"""
+        return self.rewrite_note(rel_path, **changes)
+
+    def rewrite_note(
+        self, rel_path: str | Path, *, body: str | None = None, **changes: object
+    ) -> Note:
+        """原地改写一条已有笔记：body 给了就换正文，changes 是要改的 frontmatter 字段。
+
+        文件名不动。改完的 frontmatter 会重新走一遍模型校验；旧版本留下的多余键在这次改写中消失。
         """
         note = self.read_note(rel_path)
         merged = {**note.frontmatter.model_dump(mode="python"), **changes}
         note.frontmatter = NoteFrontmatter.model_validate(merged)
+        if body is not None:
+            note.body = body
         self._atomic_write_text(self._resolve(rel_path), self._serialize_note(note))
         return note
 

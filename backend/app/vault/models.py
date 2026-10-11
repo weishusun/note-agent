@@ -10,7 +10,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Status = Literal["active", "inbox", "archived"]
-SourceKind = Literal["screenshot", "text", "url", "file", "generated"]
+SourceKind = Literal["screenshot", "text", "url", "file", "generated", "manual"]
+# 主题笔记保留一份输入的整体结构；概念笔记是一个值得单独查到的概念（SCHEMA 2.3）
+NoteType = Literal["topic", "concept"]
 
 CATEGORY_NAME_MAX = 12
 CATEGORY_SEP = "/"
@@ -55,15 +57,19 @@ class NoteFrontmatter(BaseModel):
     # 笔记的稳定标识符，创建时生成、永不变更。由 store.create_note 在写入层生成：
     # 模型层给默认值会在读取无 id 的笔记时当场捏一个新的，读两次得到两个值。
     id: str | None = None
+    # v4 及以前的笔记没有这个键，按概念笔记处理
+    type: NoteType = "concept"
     title: str = Field(min_length=1, max_length=60)
     category: str | None
     # 使用者手动指定过分类：重新归类必须跳过（SCHEMA 3.3）
     category_locked: bool = False
     tags: list[str] = Field(default_factory=list, max_length=6)
     aliases: list[str] = Field(default_factory=list)
-    summary: str = Field(min_length=1, max_length=50)
+    summary: str = Field(min_length=1, max_length=80)
     status: Status
     confidence: float = Field(ge=0.0, le=1.0)
+    # 疑似与之重复的那条已有笔记的 id，等使用者决定合并还是保留（SCHEMA 2.5）
+    duplicate_of: str | None = None
     created: datetime
     updated: datetime
     source: SourceRef
@@ -99,6 +105,7 @@ class Note(BaseModel):
 class NoteRef(BaseModel):
     # null 表示手工放进 vault、无 id 的笔记（SCHEMA 第 5 节）
     id: str | None
+    type: NoteType
     path: str
     title: str
     category: str | None
@@ -106,6 +113,7 @@ class NoteRef(BaseModel):
     tags: list[str]
     summary: str
     status: Status
+    duplicate_of: str | None
     updated: datetime
     confidence: float
 
@@ -116,6 +124,7 @@ class NoteRef(BaseModel):
         fm = note.frontmatter
         return cls(
             id=fm.id,
+            type=fm.type,
             path=note.path.as_posix(),
             title=fm.title,
             category=fm.category,
@@ -123,6 +132,7 @@ class NoteRef(BaseModel):
             tags=fm.tags,
             summary=fm.summary,
             status=fm.status,
+            duplicate_of=fm.duplicate_of,
             updated=fm.updated,
             confidence=fm.confidence,
         )
@@ -201,4 +211,6 @@ class Tree(BaseModel):
 
     total: int
     inbox: int
+    # 疑似重复、等使用者决定的笔记数
+    duplicates: int = 0
     categories: list[TreeParent]

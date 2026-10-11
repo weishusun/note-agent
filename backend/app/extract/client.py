@@ -58,7 +58,7 @@ def _build(
 
 
 def get_extract_model(override: str | None = None):
-    """视觉/提取模型。默认保持思考开启:关掉快 5-10 倍,但实测会漏掉截图里的部分内容。"""
+    """视觉/提取模型。默认关闭思考(设置里可以打开):开着一张图要 100 秒以上。"""
     current = settings.load()
     name = _resolve_model(override, current.extract_model, "提取模型")
     return _build(name, current, no_thinking=current.extract_disable_thinking)
@@ -94,22 +94,12 @@ def get_answer_model(override: str | None = None):
     return _build(_resolve_model(override, current.effective_answer_model, "问答模型"), current)
 
 
-def extract_uses_json_mode() -> bool:
-    """提取这一步是否走 json_mode(此时提示词里必须写明输出的 JSON 结构)。"""
-    current = settings.load()
-    return current.extract_disable_thinking or current.structured_output_method == "json_mode"
-
-
-def bind_structured(model, schema):
-    """给提取模型挂结构化输出,始终 include_raw 以便读 usage 和在失败时看清模型实际返回。
-    关闭思考时强制 json_mode:此时 function calling 不可用。"""
-    method = "json_mode" if extract_uses_json_mode() else "function_calling"
-    return model.with_structured_output(schema, method=method, include_raw=True)
-
-
 def bind_json(model, schema):
-    """文本模型的辅助调用固定用 json_mode,不跟随 structured_output_method:
-    关闭思考后 function calling 不可用。提示词里必须写明要输出的 JSON 字段。"""
+    """所有结构化输出一律用 json_mode,始终 include_raw 以便读 usage 和在失败时看清模型实际返回。
+
+    不用 function calling:真实接口上实测,智谱在关闭思考后它的输出是坏的,开着思考时遇到嵌套结构
+    也会把整段内容塞成一个字符串。json_mode 下模型看不到 schema,提示词里必须写明要输出的 JSON 结构。
+    """
     return model.with_structured_output(schema, method="json_mode", include_raw=True)
 
 

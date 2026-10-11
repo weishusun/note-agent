@@ -38,7 +38,11 @@ def answer_question(
             # 索引里有、磁盘上已被用户删掉或改坏：跳过，不让一条坏笔记拖垮整次问答
             continue
         sources.append(ref)
-        blocks.append(f"[{len(sources)}] {note.frontmatter.title}\n{note.body.strip()}")
+        # 概要只存在 frontmatter 里（SCHEMA 2.3），要单独带上；正文里的「模型补充」区块自带标记
+        blocks.append(
+            f"[{len(sources)}] {note.frontmatter.title}\n"
+            f"概要：{note.frontmatter.summary}\n{note.body.strip()}"
+        )
 
     notes_text = "\n\n".join(blocks) if blocks else "(没有检索到任何笔记)"
     messages = [

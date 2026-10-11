@@ -20,8 +20,8 @@ _RANK_FTS = 2
 _RANK_BROWSE = 3
 
 _ROW_COLUMNS = (
-    "path, id, title, category, category_locked, tags, aliases, summary, status,"
-    " confidence, updated"
+    "path, id, type, title, category, category_locked, tags, aliases, summary, status,"
+    " confidence, duplicate_of, updated"
 )
 
 
@@ -148,14 +148,17 @@ def list_recent(
     limit: int = 50,
     category: str | None = None,
     status: str | None = None,
+    duplicates: bool = False,
 ) -> list[NoteRef]:
     """GET /api/notes：最近更新的笔记，新的在前，不含 archived。
 
     category 是「大块/小块」时只列该小块，只给「大块」时列它下面所有小块；都只列 active 的。
-    status="inbox" 只列待整理的。两个都不给：全部笔记，含待整理。
+    status="inbox" 只列待整理的；duplicates=True 只列疑似重复的。都不给：全部笔记，含待整理。
     """
     where, params = "status != 'archived'", []
-    if status == "inbox":
+    if duplicates:
+        where += " AND duplicate_of IS NOT NULL"
+    elif status == "inbox":
         where = "status = 'inbox'"
     elif category:
         where = "status = 'active' AND "
@@ -281,19 +284,21 @@ def categories_in_use(index: SearchIndex) -> set[str]:
     return {category for (category,) in rows}
 
 
-def status_counts(index: SearchIndex) -> tuple[int, int]:
-    """(未归档的笔记总数, 待整理的笔记数)。"""
+def status_counts(index: SearchIndex) -> tuple[int, int, int]:
+    """(未归档的笔记总数, 待整理的笔记数, 疑似重复的笔记数)。"""
     with index.connect() as conn:
-        total, inbox = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(status = 'inbox'), 0) FROM notes"
-            " WHERE status != 'archived'"
+        total, inbox, duplicates = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(status = 'inbox'), 0),"
+            " COALESCE(SUM(duplicate_of IS NOT NULL), 0)"
+            " FROM notes WHERE status != 'archived'"
         ).fetchone()
-    return total, inbox
+    return total, inbox, duplicates
 
 
 def _to_ref(row: dict) -> NoteRef:
     return NoteRef(
         id=row["id"],
+        type=row["type"],
         path=row["path"],
         title=row["title"],
         category=row["category"],
@@ -301,6 +306,7 @@ def _to_ref(row: dict) -> NoteRef:
         tags=row["tags"],
         summary=row["summary"],
         status=row["status"],
+        duplicate_of=row["duplicate_of"],
         updated=row["updated"],
         confidence=row["confidence"],
     )

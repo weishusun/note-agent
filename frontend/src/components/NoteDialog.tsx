@@ -97,8 +97,14 @@ export function NoteDialog({
         <header className="flex items-start gap-3 border-b p-4">
           <div className="flex min-w-0 flex-1 flex-col gap-2">
             <h2 className="text-base font-semibold">{frontmatter?.title ?? target.title}</h2>
+            {frontmatter && (
+              <p className="text-sm text-muted-foreground">{frontmatter.summary}</p>
+            )}
             {frontmatter && !editing && (
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                {frontmatter.type === "topic" && (
+                  <span className="rounded bg-muted px-1.5 py-0.5">主题笔记</span>
+                )}
                 {frontmatter.status === "inbox" && (
                   <span className="rounded bg-muted px-1.5 py-0.5 font-medium text-foreground">
                     待整理
