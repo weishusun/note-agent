@@ -29,6 +29,9 @@ CLASSIFY_MODEL: str | None = os.environ.get("CLASSIFY_MODEL")
 # 结构化输出方式:function_calling | json_mode。GLM 对两者支持不一,撞墙时改 .env 即可
 STRUCTURED_OUTPUT_METHOD: str = os.environ.get("STRUCTURED_OUTPUT_METHOD", "function_calling")
 
+# 分类置信度低于此值的笔记强制落 inbox（SCHEMA 不变量 10）。待 eval 校准
+INBOX_CONFIDENCE_THRESHOLD: float = 0.6
+
 
 def require_api_key() -> str:
     """在真正建模型前调用。缺 key 立刻抛可读错误,不拖到调用时才 401。"""
