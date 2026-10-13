@@ -1,7 +1,7 @@
 """录入流水线：解析 → 拆分 → 归类 → 写入（落盘、入索引、git 提交）。顺序执行，只新建不修改。
 
 输入分两路（SCHEMA 2.4）：截图和短文本交给 extractor，保留原结构；
-长文本和文件先读成纯文本，再交给 digest 做摘要级整理。两路的产出形状相同，之后的步骤共用。
+长文本、文件和网页先读成纯文本，再交给 digest 做摘要级整理。两路的产出形状相同，之后的步骤共用。
 """
 
 import hashlib
@@ -16,6 +16,7 @@ from app.extract.extractor import _image_mime, extract_drafts
 from app.extract.models import Extraction
 from app.ingest.assemble import assemble_concept, assemble_topic
 from app.ingest.sources import read_document
+from app.ingest.web import fetch_page
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
 from app.search.query import find_same_name
@@ -44,12 +45,13 @@ def run_ingest(
     image: bytes | None = None,
     file: bytes | None = None,
     filename: str | None = None,
+    url: str | None = None,
     on_stage: Callable[[str], None] = lambda stage: None,
     on_progress: Callable[[int, int], None] = lambda done, total: None,
 ) -> list[str]:
     """处理一次输入，返回新建笔记的 id：有主题笔记时它排第一，其后是概念笔记。
 
-    kind=file 时给 file 和 filename；其余给 text 或 image。
+    kind=file 时给 file 和 filename；kind=url 时给 url；其余给 text 或 image。
     on_progress 只在长资料分段整理时调用：(已整理的段数, 总段数)。
     """
     started = time.perf_counter()
@@ -66,6 +68,22 @@ def run_ingest(
         )
         asset = (file, document.ext, document.title)
         text = None
+    elif kind == "url":
+        if not url:
+            raise ValueError("kind=url 需要 url")
+        on_stage("解析")
+        page = fetch_page(url)
+        on_stage("拆分")
+        if len(page.text) >= SHORT_TEXT_MAX_CHARS:
+            extraction, _info = digest_document(
+                page.text, title_hint=page.title or None, on_progress=on_progress
+            )
+        else:
+            # 很短的网页和短文本一样处理：保留原结构
+            body = f"{page.title}\n\n{page.text}" if page.title else page.text
+            extraction, _usage = extract_drafts(None, body)
+        # 网页不留底，只记网址；assemble 从 text 里取它
+        text = url
     elif image is None and text is not None and len(text.strip()) >= SHORT_TEXT_MAX_CHARS:
         on_stage("拆分")
         extraction, _info = digest_document(text, on_progress=on_progress)

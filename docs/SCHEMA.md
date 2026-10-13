@@ -10,6 +10,7 @@ v5 → v6 变更(REQUIREMENTS 第 3 步「录入队列、长文档、网页链�
 `created_at`、`finished_at`,`created`/`inbox` 改为现查;新增 `GET /api/jobs`、`DELETE /api/jobs`、
 `POST /api/jobs/{id}/retry`、`DELETE /api/jobs/{id}`(§5);补充不变量 1、8。
 新增**摘要级整理**:长文本(≥ 2000 字)和文件(PDF、Markdown、纯文本)读完后压缩成 1 条主题笔记(摘要 + 大纲)加关键概念笔记;`POST /api/ingest` 接受 `kind=file`,`kind=text` 不再限 2000 字;录入任务有了 `progress`(§2.4、§5)。
+新增**网页链接**:`POST /api/ingest` 接受 `kind=url` 和新字段 `url`,后端抓取网页正文后同样做摘要级整理;网页不留底,只记网址(§2.4、§5)。
 
 v4 → v5 变更(REQUIREMENTS 第 2 步「笔记质量和编辑」):笔记分**主题笔记**和**概念笔记**两种,frontmatter 新增 `type`(§2.2、§2.3);
 正文结构重写,`summary` 只在 frontmatter 里、正文不再有 `## 一句话`(§2.3);允许**模型补充**,只能出现在 `## 模型补充` 区块(§2.3);
@@ -237,7 +238,7 @@ source:
 | 短文本 | `kind=text`,< 2000 字 | 同上 |
 | 长文本 | `kind=text`,≥ 2000 字 | **摘要级整理**(见下) |
 | 文件 | `kind=file`:`.pdf`、`.md`、`.markdown`、`.txt`,≤ 30 MB | 同上 |
-| 网页链接 | `kind=url` | *(本步后续)* 同上 |
+| 网页链接 | `kind=url` | 抓到的正文 ≥ 2000 字走摘要级整理;不足的和短文本一样,保留原结构 |
 
 **摘要级整理**(长资料):读完之后压缩,不逐句保留原文。
 
@@ -266,9 +267,16 @@ source:
   再把各段的要点拼起来做最后的整理。任何一段失败,整份资料算失败——少一段的摘要不可信。
   任务的 `progress` 报告已经读完几段(§5)。
 - **上限:** 超过 20 万字只处理前 20 万字,并在 `## 内容` 末尾注明。
+- **读网页:** 后端对网址发一次普通的 HTTP 请求(带浏览器的 User-Agent,跟随跳转,20 秒超时,网页最多读 5 MB)。
+  **不执行页面里的脚本,不带任何登录状态**——需要登录的页面、内容靠脚本加载的页面抓不到正文。
+  取正文的办法:去掉脚本、样式、导航、页眉页脚、侧栏;页面有 `<article>` 或 `<main>` 且里面的字够多就只取那一块;
+  连着三行以上「整行都是链接」的(菜单、目录、推荐阅读)整片去掉。标题依次取 `og:title`、`<title>`(去掉「 - 网站名」)、第一个 `<h1>`。
+  编码依次看响应头、页面的 `<meta charset>`,再试 UTF-8 和 GB18030。
+  网址指向 PDF 时按 PDF 读。正文不足 200 字、被拒绝访问(401 / 403)、打不开、超时,都**报失败并说明原因**,提示改用截图。
 - **原始输入留底:** 文件原样存进 `assets/`,**沿用原来的文件名**(清理非法字符,重名加序号),
   `## 原始输入` 里写 `![[assets/讲义.pdf]]`,界面显示成能点开的链接。
   长文本的全文存成 `assets/<时间>.txt`,`## 原始输入` 里只引开头 200 字,后面跟 `全文:![[assets/….txt]]`。
+  **网页不留底**:`source.ref` 和 `## 原始输入` 都只记网址(界面显示成能点开的链接)。网页以后变了或没了,笔记不受影响,但也找不回原文。
 
 ### 2.5 疑似重复
 
@@ -471,6 +479,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   "image_b64": null,
   "file_b64": "...",
   "filename": "讲义.pdf",
+  "url": null,
   "force": false              // true 则跳过幂等检查，强制重新处理（见不变量 8）
 }
 ```
@@ -480,12 +489,14 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 `kind=generated` 时只需 `text`(用户原话)。
 
-目前接受三种(分别走哪一路见 §2.4),其余 kind 与不合法的请求体返回 `400`:
+目前接受四种(分别走哪一路见 §2.4),其余 kind 与不合法的请求体返回 `400`:
 
 - `screenshot`:必填 `image_b64`,可带 `data:image/png;base64,` 前缀。
 - `text`:必填 `text`,去首尾空白后非空、不超过 100 万字。
 - `file`:必填 `file_b64`(同样可带 data URL 前缀)和 `filename`。扩展名须是 `.pdf`、`.md`、`.markdown`、`.txt` 之一,解码后不超过 30 MB。
   文件**读不读得出字**在这里不检查——那是处理时的事,读不出来任务会失败并说明原因。
+- `url`:必填 `url`,须以 `http://` 或 `https://` 开头、不含空白、不超过 2000 字符。`#` 后面的片段会被去掉(它不影响抓到的内容,所以只有片段不同的两个网址算同一份输入)。
+  网页**抓不抓得到**同样是处理时的事。重试一个失败的网页任务会重新抓取。
 
 ### `GET /api/jobs/{job_id}`
 
@@ -785,7 +796,8 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 7. 每次成功写入以一次 `git commit` 结尾。message 格式:录入 `note: 新建 3 条 (来源 screenshot)`;
    分类改动 `taxonomy: <做了什么>`,如 `taxonomy: 「模型训练」改名为「训练流程」(改写 9 条)`、
    `taxonomy: 重新归类 132 条`。提交失败只记日志,不让操作本身算失败
-8. **幂等。** hash 在 `POST /api/ingest` 的 API 边界计算,输入为 `sha256(kind + "\0" + (text or file_bytes))`。
+8. **幂等。** hash 在 `POST /api/ingest` 的 API 边界计算,输入为 `sha256(kind + "\0" + (text or file_bytes or url))`。
+   网页按**网址**算,不按内容算:同一个网址再次提交会命中,哪怕网页内容已经变了——要重新抓取就选「重新处理」。
    **filename 不进 hash**——内容相同即同一次输入。
    命中 `ingest_log` 时**不静默跳过**:返回已有结果并置 `duplicate: true`,由用户决定是否重新处理
    (`POST /api/jobs/{id}/retry`,或带 `force: true` 重发);两者都跳过幂等检查。

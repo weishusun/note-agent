@@ -1,7 +1,7 @@
 import type { ReactNode } from "react"
 
 // 笔记正文的轻量渲染：覆盖录入时会生成的写法（SCHEMA 2.3）——
-// 标题、有序/无序/嵌套列表、表格、引用块、![[截图]]、![[原文件]]、[[双链]]、**加粗**、`代码`。其余按普通段落显示。
+// 标题、有序/无序/嵌套列表、表格、引用块、![[截图]]、![[原文件]]、[[双链]]、**加粗**、`代码`、网址。其余按普通段落显示。
 
 interface ListItem {
   // 缩进层级：每两个空格算一层
@@ -25,7 +25,7 @@ const ASSET = /^!\[\[assets\/([^\]|]+)\]\]$/
 const HEADING = /^(#{1,6})\s+(.*)$/
 const LIST_ITEM = /^(\s*)([-*]|\d+[.)])\s+(.*)$/
 const TABLE_DIVIDER = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/
-const INLINE = /(!?\[\[[^\]]+\]\]|\*\*[^*]+\*\*|`[^`]+`)/
+const INLINE = /(!?\[\[[^\]]+\]\]|\*\*[^*]+\*\*|`[^`]+`|https?:\/\/[^\s<>"'，。；、）】]+)/
 
 function cells(line: string): string[] {
   return line
@@ -98,6 +98,19 @@ export function NoteBody({
 }) {
   const inline = (text: string): ReactNode[] =>
     text.split(INLINE).map((part, i) => {
+      if (/^https?:\/\//.test(part)) {
+        return (
+          <a
+            key={i}
+            href={part}
+            target="_blank"
+            rel="noreferrer"
+            className="break-all text-primary underline decoration-muted-foreground/50 underline-offset-4 hover:decoration-primary"
+          >
+            {part}
+          </a>
+        )
+      }
       const asset = ASSET.exec(part)
       if (asset) {
         return (

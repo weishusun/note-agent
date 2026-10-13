@@ -114,6 +114,12 @@ def _source(kind: SourceKind, asset_path: str | None, text: str | None) -> tuple
         if not asset_path:
             raise ValueError("kind=screenshot 需要 asset_path")
         return SourceRef(kind=kind, ref=asset_path), f"![[{asset_path}]]"
+    if kind == "url":
+        # 网页不留底：text 里传的是网址，来源和原始输入都只记它
+        url = (text or "").strip()
+        if not url:
+            raise ValueError("kind=url 需要网址")
+        return SourceRef(kind=kind, ref=url), url
     if kind == "file":
         if not asset_path:
             raise ValueError("kind=file 需要 asset_path")

@@ -14,6 +14,7 @@ from app.extract.classifier import Placement
 from app.extract.extractor import ExtractError
 from app.extract.models import Extraction, NoteDraft, TopicDraft
 from app.ingest import sources
+from app.ingest.sources import Document, SourceError
 from app.ingest import pipeline
 from app.ingest.pipeline import input_hash
 from app.ingest.queue import IngestQueue
@@ -342,6 +343,9 @@ def test_classification_failure_does_not_fail_ingest(
         (dict(kind="file", filename="讲义.pdf"), "file_b64"),
         (dict(kind="file", file_b64="不是 base64!", filename="讲义.pdf"), "base64"),
         (dict(kind="generated", text="记录量子力学"), "暂不支持"),
+        (dict(kind="url"), "http"),
+        (dict(kind="url", url="example.com/没有协议"), "http"),
+        (dict(kind="url", url="https://a.com/有 空格"), "合法的网址"),
     ],
 )
 def test_invalid_requests_rejected(
@@ -668,3 +672,72 @@ def test_chunk_progress_is_reported_while_digesting(
 
     assert seen == [("拆分", {"done": n, "total": 3}) for n in range(4)]
     assert (job["status"], job["progress"]) == ("done", None)  # 换阶段后进度清掉
+
+
+# ---------- 网页链接（SCHEMA 2.4） ----------
+
+
+@pytest.fixture
+def pages(monkeypatch: pytest.MonkeyPatch) -> dict[str, Document | Exception]:
+    """假的网络：网址 → 抓到的正文，或者抓取时要抛的异常。"""
+    table: dict[str, Document | Exception] = {}
+
+    def fetch(url: str) -> Document:
+        result = table[url]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(pipeline, "fetch_page", fetch)
+    return table
+
+
+def test_url_ingest_fetches_the_page_and_digests_it(
+    client: TestClient, vault_root: Path, stubs: Stubs, pages: dict
+) -> None:
+    url = "https://blog.example.com/rag-vs-finetuning?utm=1"
+    pages[url] = Document(title="RAG 还是微调", text="正文。" * 1000, ext=".html")
+
+    job = _ingest(client, kind="url", url=f"  {url}#评论区 ")
+
+    # 片段（# 后面的）不影响抓到的内容，去掉；列表里显示不带协议的网址
+    assert (job["status"], job["kind"], job["label"]) == ("done", "url", url.split("://")[1])
+    assert stubs.digest_calls == [("正文。" * 1000, "RAG 还是微调")] and stubs.extract_calls == []
+    # 网页不留底：只记网址
+    assert list((vault_root / "assets").iterdir()) == []
+    topic, rag = _read(vault_root, "RAG 与微调的对比.md"), _read(vault_root, "RAG.md")
+    assert topic.rstrip().endswith(f"## 原始输入\n{url}")
+    concept = client.get("/api/notes/notes/RAG.md").json()
+    assert concept["frontmatter"]["source"] == {"kind": "url", "ref": url}
+    assert "kind: url" in topic and url not in concept["body"]  # 概念笔记正文里不重复放来源
+    assert stubs.commits == ["note: 新建 3 条 (来源 url)"]
+
+    # 同一个网址（哪怕片段不同）算同一份输入
+    again = _ingest(client, kind="url", url=url + "#别的位置")
+    assert again["duplicate"] is True and len(stubs.digest_calls) == 1
+
+
+def test_short_page_keeps_its_structure_like_short_text(
+    client: TestClient, stubs: Stubs, pages: dict
+) -> None:
+    pages["https://example.com/short"] = Document(title="短页面", text="只有几句话。", ext=".html")
+    job = _ingest(client, kind="url", url="https://example.com/short")
+    assert job["status"] == "done"
+    assert stubs.digest_calls == [] and stubs.extract_calls == [(None, "短页面\n\n只有几句话。")]
+
+
+def test_page_that_cannot_be_fetched_fails_the_job_and_can_be_retried(
+    client: TestClient, vault_root: Path, stubs: Stubs, pages: dict
+) -> None:
+    url = "https://zhuanlan.example.com/p/1"
+    pages[url] = SourceError("这个网站拒绝了访问（HTTP 403），多半需要登录或者限制了程序抓取。可以改用截图录入")
+    job = _ingest(client, kind="url", url=url)
+    assert job["status"] == "failed" and "改用截图" in job["error"]
+    assert stubs.digest_calls == [] and list((vault_root / "notes").iterdir()) == []
+
+    # 网站恢复了（或者使用者登录了代理）：重试时重新抓取
+    pages[url] = Document(title="", text="正文。" * 1000, ext=".html")
+    assert client.post(f"/api/jobs/{job['id']}/retry").status_code == 202
+    assert client.app.state.queue.wait_idle()
+    assert client.get(f"/api/jobs/{job['id']}").json()["status"] == "done"
+    assert stubs.digest_calls == [("正文。" * 1000, None)]

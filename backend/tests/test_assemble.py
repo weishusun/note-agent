@@ -182,6 +182,7 @@ def test_default_timestamp_has_timezone() -> None:
         (dict(kind="screenshot"), "asset_path"),
         (dict(kind="text", text="   "), "非空 text"),
         (dict(kind="file"), "asset_path"),
+        (dict(kind="url", text=" "), "网址"),
         (dict(kind="generated", text="记录量子力学"), "暂不支持"),
     ],
 )
@@ -218,3 +219,12 @@ def test_long_text_source_quotes_only_the_opening_and_links_the_full_text() -> N
     assert note.frontmatter.source.ref == text[:100]
     original = note.body.split("## 原始输入\n")[1]
     assert original == "> 第一行\n> " + "长" * 196 + "……\n\n全文：![[assets/2026-10-13-190000.txt]]\n"
+
+
+def test_url_source_records_only_the_address() -> None:
+    note = _topic_note(kind="url", text="https://example.com/post?id=1")
+    assert (note.frontmatter.source.kind, note.frontmatter.source.ref) == (
+        "url",
+        "https://example.com/post?id=1",
+    )
+    assert note.body.endswith("## 原始输入\nhttps://example.com/post?id=1\n")

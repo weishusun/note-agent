@@ -19,6 +19,7 @@ from app.ingest.jobs import JobRegistry, JobState, Progress
 from app.ingest.pipeline import input_hash, run_ingest
 from app.ingest.queue import IngestQueue, JobNotRetryable, JobRunning, QueuedJob
 from app.ingest.sources import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS, file_extension
+from app.ingest.web import normalize_url
 from app.organize.api import build_router as build_organize_router
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
@@ -37,6 +38,7 @@ class IngestRequest(BaseModel):
     image_b64: str | None = None
     file_b64: str | None = None
     filename: str | None = None
+    url: str | None = None
     force: bool = False
 
 
@@ -109,6 +111,14 @@ def _parse_ingest(req: IngestRequest) -> _Input:
                 status_code=400, detail=f"文件太大了，最大 {MAX_FILE_BYTES // 1024 // 1024} MB"
             )
         return _Input("file", data, filename, filename)
+    if req.kind == "url":
+        try:
+            url = normalize_url(req.url or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        bare = url.split("://", 1)[1]
+        label = bare if len(bare) <= _LABEL_CHARS * 2 else bare[: _LABEL_CHARS * 2] + "…"
+        return _Input("url", url.encode("utf-8"), label)
     raise HTTPException(status_code=400, detail=f"暂不支持的来源: {req.kind}")
 
 
@@ -141,6 +151,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             image=payload if job.kind == "screenshot" else None,
             file=payload if job.kind == "file" else None,
             filename=job.filename,
+            url=payload.decode("utf-8") if job.kind == "url" else None,
             on_stage=on_stage,
             on_progress=on_progress,
         )

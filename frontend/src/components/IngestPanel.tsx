@@ -11,6 +11,16 @@ import { cn } from "@/lib/utils"
 const LONG_TEXT_CHARS = 2000
 const FILE_TYPES = [".pdf", ".md", ".markdown", ".txt"]
 const MAX_FILE_BYTES = 30 * 1024 * 1024
+const URL_LINE = /^https?:\/\/\S+$/i
+
+// 文本框里每一行都是网址（一行一个）时，按网页链接录入；否则整段当文字
+function urlsIn(text: string): string[] {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  return lines.length > 0 && lines.every((line) => URL_LINE.test(line)) ? lines : []
+}
 
 // 已经放进来、还没加入队列的截图或文件
 interface Staged {
@@ -99,6 +109,7 @@ export function IngestPanel({
   }, [active, stage])
 
   const trimmed = text.trim()
+  const urls = urlsIn(trimmed)
   const canSubmit = !busy && (staged.length > 0 || trimmed.length > 0)
 
   // 加入队列只是把输入交给后端排队，马上返回；处理在后台进行，这里可以接着放下一份
@@ -108,7 +119,8 @@ export function IngestPanel({
         ? { kind: "screenshot", image_b64: s.dataUrl }
         : { kind: "file", file_b64: s.dataUrl, filename: s.name },
     )
-    if (trimmed) inputs.push({ kind: "text", text: trimmed })
+    if (urls.length > 0) inputs.push(...urls.map((url): IngestInput => ({ kind: "url", url })))
+    else if (trimmed) inputs.push({ kind: "text", text: trimmed })
     setBusy(true)
     setError(null)
     let sent = 0
@@ -127,6 +139,8 @@ export function IngestPanel({
       setBusy(false)
       onJobsChanged()
     }
+    // urls 由 trimmed 算出来，不用单独列为依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [staged, trimmed, onJobsChanged])
 
   useEffect(() => {
@@ -237,10 +251,15 @@ export function IngestPanel({
           disabled={busy}
           rows={4}
           aria-label="要录入的文字"
-          placeholder="或者在这里粘贴一段文字，长短都可以"
+          placeholder="或者在这里粘贴一段文字（长短都可以），或者贴网址（一行一个）"
           className="w-full resize-y rounded-lg border bg-background p-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:opacity-50"
         />
-        {trimmed.length >= LONG_TEXT_CHARS && (
+        {urls.length > 0 && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            {urls.length} 个网址，会去抓取网页正文，生成摘要、大纲和关键概念。需要登录才能看的页面抓不到，那种请用截图。
+          </p>
+        )}
+        {urls.length === 0 && trimmed.length >= LONG_TEXT_CHARS && (
           <p className="mt-1 text-xs text-muted-foreground">
             {trimmed.length} 字，会按长文档处理：生成摘要、大纲和关键概念，不逐句保留原文。
           </p>
@@ -253,7 +272,7 @@ export function IngestPanel({
         </Button>
         <span className="text-xs text-muted-foreground">
           {staged.length > 0
-            ? `${staged.length} 份${trimmed ? "和一段文字" : ""}待加入，按回车提交`
+            ? `${staged.length} 份${trimmed ? (urls.length > 0 ? "和网址" : "和一段文字") : ""}待加入，按回车提交`
             : "加入后在后台依次处理，不用等，可以接着放下一份"}
         </span>
       </div>
