@@ -63,21 +63,27 @@ class FakeModel:
 
 
 class FakeExpander:
-    """冒充检索词扩展用的文本模型。keywords 是它「想出来」的检索词。"""
+    """冒充检索词扩展用的文本模型。keywords 是它「想出来」的检索词，rewritten 是它改写出来的追问。"""
 
     def __init__(self) -> None:
         self.keywords: list[str] = []
+        self.rewritten = ""
+        self.schema: type | None = None
         self.error: Exception | None = None
         self.prompts: list[str] = []
 
     def with_structured_output(self, schema, method=None, include_raw=False):
+        self.schema = schema
         return self
 
     def invoke(self, messages):
         self.prompts.append(messages[0].content)
         if self.error is not None:
             raise self.error
-        return {"parsed": expand._Keywords(keywords=self.keywords), "raw": None}
+        fields = {"keywords": self.keywords}
+        if "question" in self.schema.model_fields:
+            fields["question"] = self.rewritten
+        return {"parsed": self.schema(**fields), "raw": None}
 
 
 @pytest.fixture(autouse=True)
@@ -261,7 +267,8 @@ def test_ask_returns_answer_with_numbered_sources(client: TestClient, model: Fak
     assert resp.status_code == 200
     data = resp.json()
 
-    assert set(data) == {"answer", "sources", "grounded", "keywords"}
+    assert set(data) == {"answer", "sources", "grounded", "keywords", "rewritten"}
+    assert data["rewritten"] is None  # 不是追问
     assert data["answer"] == "RAG 先检索再生成 [1]。"
     assert data["grounded"] is True
     # 别名「检索增强」被问题包含 → 排第一；「模型微调」正文里提到检索增强，经全文档召回排其后
@@ -320,3 +327,102 @@ def test_ask_model_failure_is_502(client: TestClient, model: FakeModel) -> None:
 def test_ask_rejects_invalid_requests(client: TestClient, model: FakeModel, body: dict) -> None:
     assert client.post("/api/ask", json=body).status_code == 422
     assert model.messages is None
+
+
+# ---------- 多轮追问 ----------
+
+HISTORY = [
+    {"question": "什么是检索增强？", "answer": "RAG 在生成前先检索相关片段 [1]，再拼进上下文作答 [1][2]。"},
+]
+
+
+def test_follow_up_is_rewritten_with_the_conversation_before_retrieval(
+    client: TestClient, model: FakeModel, expander: FakeExpander
+) -> None:
+    expander.rewritten = "模型微调和检索增强有什么区别"
+    model.reply = "微调改的是模型本身 [1]。"
+    data = client.post(
+        "/api/ask", json={"question": "它和微调有什么区别", "history": HISTORY}
+    ).json()
+
+    # 改写用的提示里有上文和新问题；回答里的引用编号、换行都压掉了
+    prompt = expander.prompts[0]
+    assert "用户:什么是检索增强？\n回答:RAG 在生成前先检索相关片段 [1]，再拼进上下文作答 [1][2]。" in prompt
+    assert "## 新问题\n\n它和微调有什么区别" in prompt
+    assert "RAG 检索增强生成" in prompt  # 库里的笔记标题照样给它参考
+
+    # 拿去检索的是改写后的那句话：原话里没有「检索增强」，改写后才找得到那条笔记
+    assert data["rewritten"] == "模型微调和检索增强有什么区别"
+    assert {s["title"] for s in data["sources"]} == {"RAG 检索增强生成", "模型微调"}
+
+    # 交给问答模型的：系统提示 + 上一轮（引用编号去掉）+ 这次的笔记和**原话**
+    kinds = [type(m).__name__ for m in model.messages]
+    assert kinds == ["SystemMessage", "HumanMessage", "AIMessage", "HumanMessage"]
+    assert model.messages[1].content == "什么是检索增强？"
+    assert model.messages[2].content == "RAG 在生成前先检索相关片段，再拼进上下文作答。"
+    assert model.messages[3].content.endswith("# 问题\n\n它和微调有什么区别")
+    assert "## 追问" in model.messages[0].content
+
+
+def test_follow_up_that_needs_no_rewriting_reports_none(
+    client: TestClient, model: FakeModel, expander: FakeExpander
+) -> None:
+    expander.rewritten = "什么是模型微调"
+    data = client.post("/api/ask", json={"question": "什么是模型微调", "history": HISTORY}).json()
+    assert data["rewritten"] is None
+
+
+def test_follow_up_falls_back_to_the_previous_question_when_rewriting_fails(
+    client: TestClient, model: FakeModel, expander: FakeExpander
+) -> None:
+    expander.error = RuntimeError("超时")
+    data = client.post("/api/ask", json={"question": "再详细一点", "history": HISTORY}).json()
+
+    # 单拿「再详细一点」什么都搜不到；拼上上一问至少方向是对的
+    assert data["rewritten"] == "什么是检索增强？ 再详细一点"
+    assert data["keywords"] == []
+    assert data["sources"][0]["title"] == "RAG 检索增强生成"
+
+
+def test_only_recent_turns_are_used_and_long_answers_are_cut(
+    client: TestClient, model: FakeModel, expander: FakeExpander
+) -> None:
+    history = [{"question": f"第{i}问", "answer": f"第{i}答" + "长" * 3000} for i in range(1, 8)]
+    client.post("/api/ask", json={"question": "接着说", "history": history})
+
+    # 改写只看最近 3 轮，每轮回答只取开头
+    prompt = expander.prompts[0]
+    assert "第4问" not in prompt and all(f"第{i}问" in prompt for i in (5, 6, 7))
+    assert "长" * 301 not in prompt
+    # 问答模型看最近 4 轮，回答截到 1500 字
+    questions = [m.content for m in model.messages[1:-1:2]]
+    assert questions == ["第4问", "第5问", "第6问", "第7问"]
+    assert all(len(m.content) == 1501 and m.content.endswith("…") for m in model.messages[2:-1:2])
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        [{"question": "", "answer": "答"}],
+        [{"question": "问"}],
+        [{"question": "问", "answer": "答"}] * 51,
+        "不是列表",
+    ],
+)
+def test_ask_rejects_malformed_history(client: TestClient, model: FakeModel, history) -> None:
+    assert client.post("/api/ask", json={"question": "问", "history": history}).status_code == 422
+    assert model.messages is None
+
+
+def test_citations_that_point_at_no_note_are_removed(client: TestClient, model: FakeModel) -> None:
+    """真实接口上见过：没检索到笔记，模型在自己补充的那段里照样标了编号。"""
+    model.reply = "知识库里没有足够的相关笔记。\n\n以下为模型补充,非知识库内容:先焯水 [1]，再炒糖色[2]。代码里的 arr[0] 不动。"
+    data = client.post("/api/ask", json={"question": "今天天气怎么样"}).json()
+    assert data["sources"] == []
+    assert data["answer"].endswith("先焯水，再炒糖色。代码里的 arr[0] 不动。")
+
+    # 检索到两条笔记时：[1][2] 留着，[3] 对不上，去掉
+    model.reply = "RAG 先检索 [1]，微调改模型 [2]，蒸馏另说 [3]。"
+    data = client.post("/api/ask", json={"question": "RAG 和微调有什么区别？"}).json()
+    assert len(data["sources"]) == 2
+    assert data["answer"] == "RAG 先检索 [1]，微调改模型 [2]，蒸馏另说。"

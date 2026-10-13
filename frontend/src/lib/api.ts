@@ -46,6 +46,8 @@ export interface AskResult {
   sources: NoteRef[]
   grounded: boolean
   keywords: string[]
+  // 追问时：结合上文改写出来、实际拿去检索的那句话；不是追问或没改动时为 null
+  rewritten: string | null
 }
 
 export interface NoteDetail {
@@ -226,7 +228,9 @@ export const api = {
       method: "DELETE",
     }),
   clearJobs: () => request<{ removed: number }>("/api/jobs", { method: "DELETE" }),
-  ask: (question: string) => post<AskResult>("/api/ask", { question }),
+  // history：这段对话里之前问完了的几轮（从早到晚）。带上它，这次的问题按追问处理
+  ask: (question: string, history: { question: string; answer: string }[] = []) =>
+    post<AskResult>("/api/ask", { question, history }),
 
   notes: (filter: { category?: string; status?: "inbox"; duplicates?: "true" } = {}) =>
     request<NoteRef[]>(`/api/notes?${query({ ...filter, limit: 200 })}`),

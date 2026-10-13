@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
 from app.ask.answer import AskResult, answer_question
+from app.ask.expand import Turn
 from app.config import default_vault_root
 from app.ingest.jobs import JobRegistry, JobState, Progress
 from app.ingest.pipeline import input_hash, run_ingest
@@ -47,6 +48,8 @@ class IngestRequest(BaseModel):
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
     limit: int = Field(default=5, ge=1, le=10)
+    # 之前的几轮问答（从早到晚）。带上它，这次的问题就按追问处理
+    history: list[Turn] = Field(default_factory=list, max_length=50)
 
     @field_validator("question")
     @classmethod
@@ -294,7 +297,9 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     @app.post("/api/ask")
     def api_ask(req: AskRequest) -> AskResult:
         try:
-            return answer_question(store, index, req.question, limit=req.limit, vectors=vectors)
+            return answer_question(
+                store, index, req.question, limit=req.limit, vectors=vectors, history=req.history
+            )
         except Exception as exc:
             logger.exception("问答失败")
             raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}")
