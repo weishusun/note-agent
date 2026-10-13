@@ -31,6 +31,16 @@ export interface JobState {
   progress: { done: number; total: number } | null
 }
 
+// 录入队列里的一个任务。created / inbox 是现查的：处理完之后被删、被合并的笔记不再列出来
+export interface IngestJob extends JobState {
+  id: string
+  kind: "screenshot" | "text" | "file" | "url"
+  // 列表里显示的名字：文本的开头、文件名、网址；截图就是「截图」
+  label: string
+  created_at: string
+  finished_at: string | null
+}
+
 export interface AskResult {
   answer: string
   sources: NoteRef[]
@@ -174,6 +184,15 @@ function query(params: Record<string, string | number | undefined>): string {
 export const api = {
   ingest: (input: IngestInput) => post<{ job_id: string }>("/api/ingest", input),
   job: (jobId: string) => request<JobState>(`/api/jobs/${encodeURIComponent(jobId)}`),
+  // 录入队列：最近提交的在前。重试 = 失败的再来一次，或者「之前录入过」的重新处理
+  jobs: () => request<IngestJob[]>("/api/jobs"),
+  retryJob: (jobId: string) =>
+    post<IngestJob>(`/api/jobs/${encodeURIComponent(jobId)}/retry`, {}),
+  removeJob: (jobId: string) =>
+    request<{ removed: boolean }>(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      method: "DELETE",
+    }),
+  clearJobs: () => request<{ removed: number }>("/api/jobs", { method: "DELETE" }),
   ask: (question: string) => post<AskResult>("/api/ask", { question }),
 
   notes: (filter: { category?: string; status?: "inbox"; duplicates?: "true" } = {}) =>

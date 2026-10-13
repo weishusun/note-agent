@@ -6,7 +6,8 @@ import { IngestPanel } from "@/components/IngestPanel"
 import { NoteDialog } from "@/components/NoteDialog"
 import { NotesPanel } from "@/components/NotesPanel"
 import { SettingsPanel } from "@/components/SettingsPanel"
-import { linkTarget, type NoteRef, type NoteTarget } from "@/lib/api"
+import { linkTarget, type IngestJob, type NoteRef, type NoteTarget } from "@/lib/api"
+import { useIngestJobs } from "@/lib/useIngestJobs"
 import { cn } from "@/lib/utils"
 
 const TABS = [
@@ -17,6 +18,15 @@ const TABS = [
 ] as const
 
 type TabId = (typeof TABS)[number]["id"]
+
+// 一份输入处理完时角落里弹出的小提示
+interface Toast {
+  id: string
+  text: string
+  failed: boolean
+}
+
+const TOAST_MS = 6000
 
 function App() {
   const [tab, setTab] = useState<TabId>("ingest")
@@ -42,6 +52,22 @@ function App() {
   }, [])
   const closeCompare = useCallback(() => setCompare([]), [])
 
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const jobFinished = useCallback((job: IngestJob) => {
+    // 新笔记进了知识库：笔记页的目录和列表要跟着刷新
+    setNotesVersion((v) => v + 1)
+    const count = job.created.length + job.inbox.length
+    const name = count > 0 ? job.created.concat(job.inbox)[0].title : job.label
+    const toast: Toast = {
+      id: `${job.id}-${job.finished_at}`,
+      text: job.status === "failed" ? `「${name}」录入失败` : `「${name}」录入完成，${count} 条笔记`,
+      failed: job.status === "failed",
+    }
+    setToasts((list) => [...list, toast])
+    setTimeout(() => setToasts((list) => list.filter((t) => t.id !== toast.id)), TOAST_MS)
+  }, [])
+  const ingest = useIngestJobs(notesVersion, jobFinished)
+
   return (
     <div
       className={cn(
@@ -66,6 +92,14 @@ function App() {
               )}
             >
               {t.label}
+              {t.id === "ingest" && ingest.active > 0 && (
+                <span
+                  className="ml-1.5 rounded-full bg-primary px-1.5 text-xs text-primary-foreground tabular-nums"
+                  aria-label={`${ingest.active} 份正在处理或排队`}
+                >
+                  {ingest.active}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -76,7 +110,9 @@ function App() {
         <div hidden={tab !== "ingest"}>
           <IngestPanel
             active={tab === "ingest" && openNote === null && compare.length === 0}
-            version={notesVersion}
+            jobs={ingest.jobs}
+            jobsError={ingest.error}
+            onJobsChanged={ingest.refresh}
             onOpenNote={openRef}
             onCompare={openCompare}
           />
@@ -113,6 +149,26 @@ function App() {
           onResolved={compareResolved}
           onClose={closeCompare}
         />
+      )}
+
+      {/* 在录入页时队列本身就看得到，不用再弹 */}
+      {tab !== "ingest" && toasts.length > 0 && (
+        <div className="fixed right-4 bottom-4 z-40 flex flex-col items-end gap-2">
+          {toasts.map((toast) => (
+            <button
+              key={toast.id}
+              type="button"
+              role="status"
+              onClick={() => setTab("ingest")}
+              className={cn(
+                "max-w-xs rounded-lg border bg-background px-3 py-2 text-left text-sm shadow-lg transition-colors hover:bg-muted",
+                toast.failed && "border-destructive/40 text-destructive",
+              )}
+            >
+              {toast.text}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   )

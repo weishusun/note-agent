@@ -4,7 +4,12 @@
 > 实现与本文件冲突时,改实现,不改本文件。
 > 确需改本文件时,必须同一次 commit 内同步修改 `backend/app/vault/models.py`。
 
-**版本:v5**
+**版本:v6**
+v5 → v6 变更(REQUIREMENTS 第 3 步「录入队列、长文档、网页链接」):录入改为**持久队列**,一份一份按提交顺序处理,
+重启后接着处理(§2.7);新增 `vault/.noteagent/queue.db`(§1);`GET /api/jobs/{job_id}` 的录入任务多了 `id`、`kind`、`label`、
+`created_at`、`finished_at`,`created`/`inbox` 改为现查;新增 `GET /api/jobs`、`DELETE /api/jobs`、
+`POST /api/jobs/{id}/retry`、`DELETE /api/jobs/{id}`(§5);补充不变量 1、8。
+
 v4 → v5 变更(REQUIREMENTS 第 2 步「笔记质量和编辑」):笔记分**主题笔记**和**概念笔记**两种,frontmatter 新增 `type`(§2.2、§2.3);
 正文结构重写,`summary` 只在 frontmatter 里、正文不再有 `## 一句话`(§2.3);允许**模型补充**,只能出现在 `## 模型补充` 区块(§2.3);
 新增**疑似重复**:frontmatter 新增 `duplicate_of`,并排对比后由使用者选留哪条、都留还是合并(§2.5);新增**编辑、删除、手写新建**,改标题会重命名文件并改写全库链接(§2.6);
@@ -52,8 +57,9 @@ vault/                       # 独立 git 仓库
 ├── inbox/                   # 旧目录：v3 及以前的未分类笔记留在这里，v4 起不再写入
 ├── maps/                    # 暂不使用（v4 的目录树由应用实时生成，不落文件）
 ├── assets/                  # 截图、上传文件等原始素材
-└── .noteagent/
-    └── index.db             # SQLite，派生物，可随时删除重建
+└── .noteagent/              # 不进 git
+    ├── index.db             # SQLite，派生物，可随时删除重建
+    └── queue.db             # SQLite，录入队列（§2.7）。不是派生物：里面是还没处理的输入
 ```
 
 **硬规则:`notes/` 必须扁平,文件创建后不移动。** 分类和状态都只写在 frontmatter 里,不靠目录表达。
@@ -268,6 +274,27 @@ source:
 
 删除、只留一条和合并在应用内**没有撤销**。vault 是 git 仓库,每次操作都有一次提交,需要时可以用 git 找回。
 
+### 2.7 录入队列
+
+提交输入和处理输入是分开的:`POST /api/ingest` 只把输入**存进队列**就返回,使用者可以接着提交下一份;
+后台**一次只处理一份**,按提交顺序来。
+
+- **存在哪:** `vault/.noteagent/queue.db`,一个任务一行,输入本身(文本、图片、文件的字节)也存在里面。
+  处理成功后输入清掉,只留结果;失败的任务和「之前录入过」的任务留着输入,供重试。
+- **任务的状态:** `pending`(排队中)→ `running`(处理中)→ `done` / `failed`。
+  一份失败不影响后面的,队列继续往下走。
+- **结果是现查的:** 任务只记它建了哪些笔记的 `id`。查询时现去索引里取,所以之后被删、被合并掉的笔记
+  不再列出来,被改过的显示改后的样子。
+- **重启:** 进程启动时,没处理完的任务接着处理。重启前正处理到一半的那一份**从头重做**——它可能已经
+  写下了一部分笔记,重做会再写一遍,其中重名的概念笔记会被标成疑似重复(§2.5),由使用者处理。
+- **同一份输入:** 还在队列里(排队或处理中)时再次提交,不重复排队,返回原来那个任务。
+  已经处理过的,见不变量 8。
+- **使用者能做的:** 取消还在排队的任务;重试失败的任务;对「之前录入过」的任务要求重新处理(都排到队尾);
+  清掉处理完的记录。**这些都只动队列里的记录,不动已经写进知识库的笔记。** 正在处理的任务不能取消。
+- 处理完的记录只留最近 200 条。
+
+重新归类(§3.4)的任务不走这个队列:它不需要跨重启,状态只在进程内存里。
+
 ---
 
 ## 3. 分类
@@ -394,7 +421,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 `rebuild_all()` 扫描 `notes/` 和 `inbox/` 两个目录。
 
-**表结构版本:**用 `PRAGMA user_version` 记录(与本文件的版本号一致,v5 = 5)。打开时版本不符就丢弃并重建 `notes` 与 `notes_fts` 两张表,
+**表结构版本:**用 `PRAGMA user_version` 记录(与本文件的版本号一致,v6 = 6)。打开时版本不符就丢弃并重建 `notes` 与 `notes_fts` 两张表,
 随后由启动时的全量重建补回数据。`ingest_log` **不随之丢弃**——它不是从笔记文件派生的,丢了就失去重复录入的检测。
 
 ---
@@ -417,32 +444,60 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 ```
 → `202 { "job_id": "01J8X..." }`
 
+只是把输入存进队列(§2.7),不等处理。同一份输入还在队列里时返回原来那个任务的 `job_id`。
+
 `kind=generated` 时只需 `text`(用户原话)。
 
-第一版只接受 `screenshot`(必填 `image_b64`,可带 `data:image/png;base64,` 前缀)和
+目前只接受 `screenshot`(必填 `image_b64`,可带 `data:image/png;base64,` 前缀)和
 `text`(必填 `text`,去首尾空白后 < 2000 字)。其余 kind 与不合法的请求体返回 `400`。
 
 ### `GET /api/jobs/{job_id}`
 
 ```jsonc
 {
+  "id": "01J8X...",
+  "kind": "screenshot",        // screenshot | text | file | url
+  "label": "截图",              // 列表里显示的名字：文本的开头、文件名、网址；截图就是「截图」
+  "created_at": "2026-10-13T19:10:02+08:00",
+  "finished_at": "2026-10-13T19:10:31+08:00",   // 没处理完时为 null
   "status": "done",            // pending | running | done | failed
   "stage": "写入",              // 解析 | 拆分 | 分类 | 写入
   "created": [NoteRef],
   "inbox":   [NoteRef],
   "duplicate": false,          // true 表示命中 ingest_log，created/inbox 是已有结果
-  "error":   null
+  "error":   null,
+  "progress": null
 }
 ```
 
-`created` 与 `inbox` **互不重叠**:本次新建的笔记里 `status=inbox` 的进 `inbox`,其余进 `created`。
-`job_id` 不存在返回 `404`。任务状态只存在进程内存里,服务重启后查不到。
+`created` 与 `inbox` **互不重叠**:这个任务建的笔记里 `status=inbox` 的进 `inbox`,其余进 `created`。
+两者都是**查询时现取**的(§2.7):之后被删掉、被合并掉的笔记不再出现。
+`job_id` 不存在返回 `404`。
 
 重新归类(`POST /api/reclassify`)的任务也用这个接口查,此时 `stage` 为 `归类`,并多一个字段
-`"progress": { "done": 40, "total": 132 }`;`created` 与 `inbox` 为空数组。录入任务的 `progress` 为 `null`。
+`"progress": { "done": 40, "total": 132 }`;`created` 与 `inbox` 为空数组,`id`、`kind`、`created_at`、
+`finished_at` 为 `null`。这类任务只存在进程内存里,服务重启后查不到。
 
-`duplicate: true` 时**不是错误**:输入此前处理过,返回的是当时的结果。要重新处理就带
-`force: true` 重发(见不变量 8)。
+`duplicate: true` 时**不是错误**:输入此前处理过,返回的是当时的结果。要重新处理就调
+`POST /api/jobs/{job_id}/retry`,或者带 `force: true` 重新提交(见不变量 8)。
+
+### `GET /api/jobs?limit=30` → `[Job]`
+
+录入队列里的任务,**最近提交的在前**,每项的结构同上。只列录入任务,不含重新归类的任务。`limit` 1–200。
+
+### `POST /api/jobs/{job_id}/retry` → `202 Job`
+
+把一个任务重新排到队尾:失败的任务重试;`duplicate: true` 的任务重新处理(跳过幂等检查)。
+任务不存在返回 `404`;还在排队或正在处理返回 `409`;已经成功处理完的(输入已清掉)返回 `400`。
+
+### `DELETE /api/jobs/{job_id}` → `{ "removed": true }`
+
+取消一个还在排队的任务,或者清掉一条处理完的记录。**不动已经写进知识库的笔记。**
+任务不存在返回 `404`;正在处理返回 `409`。
+
+### `DELETE /api/jobs` → `{ "removed": 12 }`
+
+清掉所有 `done` 的记录。失败的留着,等使用者重试或自己清。
 
 ### `GET /api/search?q=&category=&tag=&include_inbox=false&limit=20`
 
@@ -677,7 +732,8 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 
 1. **所有对 `notes/`、`inbox/`、`taxonomy.yaml`、`maps/`、`assets/` 的读写必须经过 `backend/app/vault/`。** 其他任何位置出现 `open()` 或 `Path.write_text()` 操作这些路径都是违规。
    `.noteagent/index.db` 是派生物,由 `app/search/` 管理,但其路径必须从 `VaultStore` 取得。
-   **注意:豁免的是 `index.db` 这个派生物,不是 `.noteagent/` 这个目录。**
+   `.noteagent/queue.db` 是录入队列,由 `app/ingest/queue.py` 管理,路径同样从 `VaultStore` 取得。
+   **注意:豁免的只是这两个数据库文件,不是 `.noteagent/` 这个目录。**
 2. 所有文件 IO 显式 `encoding="utf-8"`,路径一律 `pathlib.Path`
 3. **模型可以自动新建分类、自动给笔记归类,但不得覆盖使用者手动改过的地方。** `category_locked=true` 的笔记,
    重新归类时不得改它的分类;`locked: true` 的分类,模型不得给它改名、合并或删除(§3.3)。
@@ -695,8 +751,9 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
    `taxonomy: 重新归类 132 条`。提交失败只记日志,不让操作本身算失败
 8. **幂等。** hash 在 `POST /api/ingest` 的 API 边界计算,输入为 `sha256(kind + "\0" + (text or file_bytes))`。
    **filename 不进 hash**——内容相同即同一次输入。
-   命中 `ingest_log` 时**不静默跳过**:返回已有结果并置 `duplicate: true`,由用户决定是否带
-   `force: true` 重发;`force` 请求跳过幂等检查。
+   命中 `ingest_log` 时**不静默跳过**:返回已有结果并置 `duplicate: true`,由用户决定是否重新处理
+   (`POST /api/jobs/{id}/retry`,或带 `force: true` 重发);两者都跳过幂等检查。
+   `ingest_log` 在一份输入**处理成功之后**才写入;同一份输入还在队列里时的去重见 §2.7。
    命中时须校验 `result` 里的 id 仍存在于索引中,**全部失效则删除该条 `ingest_log` 记录**(笔记已被
    用户在 Obsidian 里删掉,这次应该当新输入处理)。
    理由:`kind=generated` 的输入是用户原话(如「记录量子力学角动量」),用户隔一段时间故意重发是

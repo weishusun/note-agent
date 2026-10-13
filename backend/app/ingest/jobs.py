@@ -1,4 +1,8 @@
-"""后台任务（录入、重新归类）的进程内登记表。只存在内存里，服务重启即清空。"""
+"""后台任务的状态（SCHEMA 第 5 节 GET /api/jobs）。
+
+录入任务存在 app/ingest/queue.py 的持久队列里；这里的 JobRegistry 是进程内的登记表，
+只给重新归类这种不需要跨重启的任务用，服务重启即清空。
+"""
 
 import threading
 from typing import Literal
@@ -18,6 +22,12 @@ class Progress(BaseModel):
 
 
 class JobState(BaseModel):
+    # 录入任务才有下面五项；重新归类的任务为 None / 空
+    id: str | None = None
+    kind: str | None = None
+    label: str = ""
+    created_at: str | None = None
+    finished_at: str | None = None
     status: JobStatus = "pending"
     stage: Stage = "解析"
     created: list[NoteRef] = []

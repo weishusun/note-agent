@@ -2,6 +2,8 @@
 
 import base64
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,8 @@ from app.extract.classifier import Placement
 from app.extract.extractor import ExtractError
 from app.extract.models import Extraction, NoteDraft, TopicDraft
 from app.ingest import pipeline
+from app.ingest.pipeline import input_hash
+from app.ingest.queue import IngestQueue
 from app.main import create_app
 from app.vault import git
 from app.vault.store import VaultStore
@@ -93,8 +97,10 @@ def client(vault_root: Path, stubs: Stubs) -> TestClient:
 
 
 def _ingest(client: TestClient, **body) -> dict:
+    """提交一份输入，等队列处理完，返回任务的最终状态。"""
     resp = client.post("/api/ingest", json=body)
     assert resp.status_code == 202, resp.text
+    assert client.app.state.queue.wait_idle(), "录入队列没有在限定时间内处理完"
     job = client.get(f"/api/jobs/{resp.json()['job_id']}")
     assert job.status_code == 200
     return job.json()
@@ -109,7 +115,12 @@ def test_text_ingest_writes_topic_and_concept_notes(
 ) -> None:
     job = _ingest(client, kind="text", text="RAG 与微调的对比")
 
-    assert set(job) == {"status", "stage", "created", "inbox", "duplicate", "error", "progress"}
+    assert set(job) == {
+        "id", "kind", "label", "created_at", "finished_at",
+        "status", "stage", "created", "inbox", "duplicate", "error", "progress",
+    }  # fmt: skip
+    assert (job["kind"], job["label"]) == ("text", "RAG 与微调的对比")
+    assert len(job["id"]) == 26 and job["created_at"] <= job["finished_at"]
     assert (job["status"], job["stage"], job["duplicate"], job["error"], job["progress"]) == (
         "done",
         "写入",
@@ -417,3 +428,123 @@ def test_the_earliest_matching_note_is_the_one_pointed_at(
     second = _ingest(client, kind="text", text="二")["created"][0]
     third = _ingest(client, kind="text", text="三")["created"][0]
     assert (second["duplicate_of"], third["duplicate_of"]) == (first["id"], first["id"])
+
+
+# ---------- 录入队列的接口（SCHEMA 2.7） ----------
+
+
+def _submit(client: TestClient, **body) -> str:
+    resp = client.post("/api/ingest", json=body)
+    assert resp.status_code == 202, resp.text
+    return resp.json()["job_id"]
+
+
+@pytest.fixture
+def gate(stubs: Stubs, monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """让提取卡住，直到测试放行：用来观察「处理中」「排队中」这些中间状态。"""
+    event = threading.Event()
+
+    def gated(image, text, override=None):
+        assert event.wait(5), "测试没有放行"
+        return stubs.extract(image, text, override)
+
+    monkeypatch.setattr(pipeline, "extract_drafts", gated)
+    return event
+
+
+def test_submissions_queue_up_and_are_listed_newest_first(
+    client: TestClient, stubs: Stubs, gate: threading.Event
+) -> None:
+    first = _submit(client, kind="text", text="第一份")
+    second = _submit(client, kind="screenshot", image_b64=base64.b64encode(PNG).decode())
+    # 同一份输入还在队列里：不重复排队，拿到的是原来那个任务
+    assert _submit(client, kind="text", text="第一份") == first
+
+    jobs = client.get("/api/jobs").json()
+    assert [(j["id"], j["kind"], j["label"]) for j in jobs] == [
+        (second, "screenshot", "截图"),
+        (first, "text", "第一份"),
+    ]
+    assert {j["status"] for j in jobs} <= {"pending", "running"}
+    assert jobs[0]["status"] == "pending" and jobs[0]["finished_at"] is None
+
+    # 排队中的可以取消，正在处理的不行
+    for _ in range(200):
+        if client.get(f"/api/jobs/{first}").json()["status"] == "running":
+            break
+        time.sleep(0.005)
+    assert client.delete(f"/api/jobs/{first}").status_code == 409
+    assert client.post(f"/api/jobs/{first}/retry").status_code == 409
+    assert client.delete(f"/api/jobs/{second}").json() == {"removed": True}
+
+    gate.set()
+    assert client.app.state.queue.wait_idle()
+    jobs = client.get("/api/jobs").json()
+    assert [(j["id"], j["status"]) for j in jobs] == [(first, "done")]
+    assert len(stubs.extract_calls) == 1  # 被取消的那份没有处理
+
+
+def test_failed_job_can_be_retried_from_the_queue(client: TestClient, stubs: Stubs) -> None:
+    stubs.extract_error = ExtractError("模型输出不合法")
+    job = _ingest(client, kind="text", text="会失败一次的输入")
+    assert (job["status"], job["error"]) == ("failed", "模型输出不合法")
+
+    stubs.extract_error = None
+    resp = client.post(f"/api/jobs/{job['id']}/retry")
+    assert resp.status_code == 202
+    assert client.app.state.queue.wait_idle()
+    again = client.get(f"/api/jobs/{job['id']}").json()
+    assert (again["status"], again["error"], len(again["created"])) == ("done", None, 2)
+    # 处理成功的任务不能再重试
+    assert client.post(f"/api/jobs/{job['id']}/retry").status_code == 400
+    assert client.post("/api/jobs/不存在/retry").status_code == 404
+    assert client.delete("/api/jobs/不存在").status_code == 404
+
+
+def test_duplicate_job_can_be_reprocessed_from_the_queue(client: TestClient, stubs: Stubs) -> None:
+    _ingest(client, kind="text", text="同一段输入")
+    again = _ingest(client, kind="text", text="同一段输入")
+    assert again["duplicate"] is True and len(stubs.extract_calls) == 1
+
+    assert client.post(f"/api/jobs/{again['id']}/retry").status_code == 202
+    assert client.app.state.queue.wait_idle()
+    redone = client.get(f"/api/jobs/{again['id']}").json()
+    assert (redone["status"], redone["duplicate"]) == ("done", False)
+    assert len(stubs.extract_calls) == 2
+    assert redone["created"][0]["path"] == "notes/RAG 与微调的对比 (2).md"
+
+
+def test_job_results_follow_later_changes_to_the_notes(client: TestClient, stubs: Stubs) -> None:
+    job = _ingest(client, kind="text", text="之后会被删掉一条")
+    rag = next(r for r in job["created"] if r["title"] == "RAG")
+    assert client.delete(f"/api/notes/{rag['id']}").status_code == 200
+
+    after = client.get(f"/api/jobs/{job['id']}").json()
+    assert [r["title"] for r in after["created"]] == ["RAG 与微调的对比"]
+
+
+def test_clearing_finished_jobs_keeps_failed_ones(client: TestClient, stubs: Stubs) -> None:
+    _ingest(client, kind="text", text="成功的")
+    stubs.extract_error = ExtractError("坏了")
+    failed = _ingest(client, kind="text", text="失败的")
+
+    assert client.delete("/api/jobs").json() == {"removed": 1}
+    assert [j["id"] for j in client.get("/api/jobs").json()] == [failed["id"]]
+
+
+def test_unfinished_jobs_are_picked_up_when_the_app_restarts(vault_root: Path, stubs: Stubs) -> None:
+    # 上一次运行留下的队列：一份处理到一半（running），一份还没轮到（pending）
+    left = IngestQueue(vault_root / ".noteagent" / "queue.db", lambda job, on_stage: [])
+    ids = [
+        left._insert("text", label, None, label.encode("utf-8"), input_hash("text", label.encode("utf-8")),
+                     status, [], False, False)
+        for label, status in (("处理到一半的", "running"), ("还没轮到的", "pending"))
+    ]  # fmt: skip
+
+    with TestClient(create_app(vault_root)) as restarted:  # with：走一遍启动流程
+        assert restarted.app.state.queue.wait_idle()
+        jobs = [restarted.get(f"/api/jobs/{i}").json() for i in ids]
+
+    assert [(j["status"], j["label"]) for j in jobs] == [("done", "处理到一半的"), ("done", "还没轮到的")]
+    assert [text for _, text in stubs.extract_calls] == ["处理到一半的", "还没轮到的"]
+    assert [r["title"] for r in jobs[0]["created"]] == ["RAG 与微调的对比", "RAG"]

@@ -53,7 +53,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 _SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL
 
 # 记在 PRAGMA user_version 里，与 SCHEMA.md 的版本号一致
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # fts 表里 aliases 的存储分隔符，查询层按它还原成列表做精确匹配
 ALIAS_SEP = "\n"

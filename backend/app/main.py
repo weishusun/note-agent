@@ -2,13 +2,13 @@ import base64
 import binascii
 import logging
 import mimetypes
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -16,6 +16,7 @@ from app.ask.answer import AskResult, answer_question
 from app.config import default_vault_root
 from app.ingest.jobs import JobRegistry, JobState
 from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
+from app.ingest.queue import IngestQueue, JobNotRetryable, JobRunning, QueuedJob
 from app.organize.api import build_router as build_organize_router
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
@@ -76,6 +77,17 @@ def _parse_ingest(req: IngestRequest) -> tuple[str | None, bytes | None]:
     raise HTTPException(status_code=400, detail=f"暂不支持的来源: {req.kind}")
 
 
+_LABEL_CHARS = 40
+
+
+def _label(kind: str, text: str | None) -> str:
+    """队列列表里显示的名字。"""
+    if kind == "screenshot":
+        return "截图"
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= _LABEL_CHARS else flat[:_LABEL_CHARS] + "…"
+
+
 def _split_refs(refs: list[NoteRef]) -> dict[str, list[NoteRef]]:
     return {
         "created": [r for r in refs if r.status != "inbox"],
@@ -91,6 +103,23 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     organizer = Organizer(store, taxonomy, index)
     jobs = JobRegistry()
 
+    def handle(job: QueuedJob, on_stage: Callable[[str], None]) -> list[str]:
+        """队列线程里执行：把一份排队的输入变成笔记。"""
+        payload = job.payload or b""
+        ids = run_ingest(
+            store,
+            index,
+            organizer,
+            kind=job.kind,  # type: ignore[arg-type]
+            text=payload.decode("utf-8") if job.kind == "text" else None,
+            image=payload if job.kind == "screenshot" else None,
+            on_stage=on_stage,
+        )
+        index.put_ingest_log(job.input_hash, ids, datetime.now().astimezone().isoformat())
+        return ids
+
+    queue = IngestQueue(store.state_dir / "queue.db", handle)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # 启动时以磁盘为准重建索引：用户可能在 Obsidian 里增删改过笔记（SCHEMA 不变量 13）。
@@ -101,9 +130,16 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             organizer.reconcile()
         except Exception:
             logger.exception("启动时重建索引失败，沿用现有索引")
+        try:
+            pending = queue.resume()
+            if pending:
+                logger.info("上次没处理完的录入任务: %d 个，继续处理", pending)
+        except Exception:
+            logger.exception("恢复录入队列失败")
         yield
 
     app = FastAPI(title="note-agent", lifespan=lifespan)
+    app.state.queue = queue
 
     app.include_router(settings_router)
     app.include_router(build_organize_router(organizer, jobs))
@@ -116,51 +152,81 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     def api_taxonomy() -> Taxonomy:
         return taxonomy.load()
 
-    def run_job(job_id: str, kind: SourceKind, text: str | None, image: bytes | None, digest: str) -> None:
-        jobs.update(job_id, status="running")
-        try:
-            ids = run_ingest(
-                store,
-                index,
-                organizer,
-                kind=kind,
-                text=text,
-                image=image,
-                on_stage=lambda stage: jobs.update(job_id, stage=stage),
-            )
-            index.put_ingest_log(digest, ids, datetime.now().astimezone().isoformat())
-            jobs.update(job_id, status="done", **_split_refs(refs_by_ids(index, ids)))
-        except Exception as exc:
-            logger.exception("录入失败 job=%s", job_id)
-            jobs.update(job_id, status="failed", error=str(exc))
+    def job_view(job: QueuedJob) -> JobState:
+        # 笔记每次现查：处理完之后被删、被合并的不再列出来，改过的显示改后的样子
+        return JobState(
+            id=job.id,
+            kind=job.kind,
+            label=job.label,
+            created_at=job.created_at,
+            finished_at=job.finished_at,
+            status=job.status,
+            stage=job.stage,
+            duplicate=job.duplicate,
+            error=job.error,
+            **_split_refs(refs_by_ids(index, job.note_ids)),
+        )
 
     @app.post("/api/ingest", status_code=202)
-    def api_ingest(req: IngestRequest, background: BackgroundTasks) -> dict[str, str]:
+    def api_ingest(req: IngestRequest) -> dict[str, str]:
         text, image = _parse_ingest(req)
-        digest = input_hash(req.kind, image if image is not None else text.encode("utf-8"))
+        payload = image if image is not None else (text or "").encode("utf-8")
+        digest = input_hash(req.kind, payload)
+        entry = dict(kind=req.kind, label=_label(req.kind, text), payload=payload, input_hash=digest)
 
         if not req.force:
+            # 同一份输入还在队列里：不重复排队
+            active = queue.find_active(digest)
+            if active is not None:
+                return {"job_id": active}
             previous = index.get_ingest_log(digest)
             if previous is not None:
-                refs = refs_by_ids(index, previous)
-                if refs:
-                    job_id = jobs.create(
-                        status="done", stage="写入", duplicate=True, **_split_refs(refs)
-                    )
-                    return {"job_id": job_id}
+                if refs_by_ids(index, previous):
+                    return {"job_id": queue.add_duplicate(note_ids=previous, **entry)}
                 # 当时建的笔记已全部不在了：按新输入处理
                 index.delete_ingest_log(digest)
 
-        job_id = jobs.create()
-        background.add_task(run_job, job_id, req.kind, text, image, digest)
-        return {"job_id": job_id}
+        return {"job_id": queue.submit(force=req.force, **entry)}
+
+    @app.get("/api/jobs")
+    def api_jobs(limit: int = Query(default=30, ge=1, le=200)) -> list[JobState]:
+        return [job_view(job) for job in queue.list(limit)]
+
+    @app.delete("/api/jobs")
+    def api_clear_jobs() -> dict[str, int]:
+        return {"removed": queue.clear_finished()}
 
     @app.get("/api/jobs/{job_id}")
     def api_job(job_id: str) -> JobState:
+        queued = queue.get(job_id)
+        if queued is not None:
+            return job_view(queued)
         job = jobs.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="任务不存在")
         return job
+
+    @app.post("/api/jobs/{job_id}/retry", status_code=202)
+    def api_retry_job(job_id: str) -> JobState:
+        try:
+            queue.retry(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        except JobRunning:
+            raise HTTPException(status_code=409, detail="这个任务已经在队列里了")
+        except JobNotRetryable:
+            raise HTTPException(status_code=400, detail="这个任务不能重新处理")
+        return api_job(job_id)
+
+    @app.delete("/api/jobs/{job_id}")
+    def api_remove_job(job_id: str) -> dict[str, bool]:
+        try:
+            queue.remove(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        except JobRunning:
+            raise HTTPException(status_code=409, detail="这个任务正在处理，不能取消")
+        return {"removed": True}
 
     @app.get("/api/search")
     def api_search(
