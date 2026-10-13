@@ -15,11 +15,13 @@ from app.extract.digest import digest_document
 from app.extract.extractor import _image_mime, extract_drafts
 from app.extract.models import Extraction
 from app.ingest.assemble import assemble_concept, assemble_topic
+from app.ingest.similar import find_similar
 from app.ingest.sources import read_document
 from app.ingest.web import fetch_page
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
 from app.search.query import find_same_name
+from app.search.vectors import VectorIndex
 from app.vault import git
 from app.vault.models import Note, SourceKind
 from app.vault.store import VaultStore, sanitize_filename
@@ -46,6 +48,7 @@ def run_ingest(
     file: bytes | None = None,
     filename: str | None = None,
     url: str | None = None,
+    vectors: VectorIndex | None = None,
     on_stage: Callable[[str], None] = lambda stage: None,
     on_progress: Callable[[int, int], None] = lambda done, total: None,
 ) -> list[str]:
@@ -53,6 +56,7 @@ def run_ingest(
 
     kind=file 时给 file 和 filename；kind=url 时给 url；其余给 text 或 image。
     on_progress 只在长资料分段整理时调用：(已整理的段数, 总段数)。
+    vectors 给了且配了向量模型时，新的概念笔记还会按内容找疑似重复（SCHEMA 2.5）。
     """
     started = time.perf_counter()
     # 原始输入怎么留底：截图、文件存进 assets/；长文本也存成一个 .txt（正文里放不下）
@@ -102,7 +106,16 @@ def run_ingest(
     on_stage("写入")
     # 素材放到模型调用成功之后再存，提取失败时不在 assets/ 留孤儿文件
     asset_path = store.save_asset(asset[0], asset[1], name=asset[2]) if asset is not None else None
-    ids = _write(store, index, extraction, placements, kind=kind, asset_path=asset_path, text=text)
+    ids = _write(
+        store,
+        index,
+        extraction,
+        placements,
+        kind=kind,
+        asset_path=asset_path,
+        text=text,
+        vectors=vectors,
+    )
 
     # 笔记已落盘，提交失败（如 vault 不是 git 仓库）不应让整次录入算失败
     try:
@@ -139,6 +152,7 @@ def _write(
     kind: SourceKind,
     asset_path: str | None,
     text: str | None,
+    vectors: VectorIndex | None = None,
 ) -> list[str]:
     topic, concepts = extraction.topic, extraction.concepts
     topic_placement = placements.pop(0) if topic is not None else None
@@ -148,11 +162,8 @@ def _write(
     # 两种笔记互相链接：概念笔记要写主题笔记的文件名，主题笔记要写概念笔记的文件名。
     # 先按「会分配到的文件名」建概念笔记，再用它们实际的文件名建主题笔记
     topic_stem = store.next_stem(topic.title) if topic is not None else None
-    # 疑似重复在落盘之前就查好：只和**已有的**笔记比，同一次录入产出的笔记之间不互相比
-    duplicates = [find_same_name(index, draft.title) for draft in concepts]
-    concept_notes: list[Note] = []
-    for draft, (category, confidence), duplicate in zip(concepts, placements, duplicates):
-        note = assemble_concept(
+    concept_notes = [
+        assemble_concept(
             draft,
             category=category,
             confidence=confidence,
@@ -161,11 +172,24 @@ def _write(
             text=text,
             topic_stem=topic_stem,
             link_targets=link_targets,
-            duplicate_of=duplicate.id if duplicate is not None else None,
         )
+        for draft, (category, confidence) in zip(concepts, placements)
+    ]
+    # 疑似重复在落盘之前就查好：只和**已有的**笔记比，同一次录入产出的笔记之间不互相比。
+    # 先比名字；名字没撞上的，再按内容找（SCHEMA 2.5）
+    by_name = [find_same_name(index, draft.title) for draft in concepts]
+    by_content, new_vectors = find_similar(
+        store, vectors, concept_notes, skip=[ref is not None for ref in by_name]
+    )
+    for note, same_name, similar, vector in zip(concept_notes, by_name, by_content, new_vectors):
+        duplicate = same_name or similar
+        if duplicate is not None:
+            note.frontmatter = note.frontmatter.model_copy(update={"duplicate_of": duplicate.id})
         store.create_note(note)
+        # 先存向量再入索引：索引一变动后台就会去补算，这时它该看到向量已经在了
+        if vectors is not None and vector is not None:
+            vectors.store(note, vector)
         index.upsert_note(note)
-        concept_notes.append(note)
 
     ids = [note.frontmatter.id for note in concept_notes]
     if topic is not None and topic_placement is not None:

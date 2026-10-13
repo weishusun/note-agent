@@ -17,6 +17,7 @@ from array import array
 from app import settings
 from app.extract import client
 from app.search.index import ALIAS_SEP, SearchIndex
+from app.vault.models import Note
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,12 @@ def embedding_text(title: str, aliases: list[str], summary: str, body: str) -> s
         parts.append("别名：" + "、".join(aliases))
     parts += [summary, "\n".join(kept).strip()]
     return "\n".join(part for part in parts if part)[:TEXT_MAX_CHARS]
+
+
+def note_text(note: Note) -> str:
+    """一条笔记（内存里的对象）拿去算向量的文字。和 sync 从索引里拼出来的是同一段。"""
+    fm = note.frontmatter
+    return embedding_text(fm.title, fm.aliases, fm.summary, note.body)
 
 
 def _hash(text: str) -> str:
@@ -134,6 +141,18 @@ class VectorIndex:
     def _on_index_changed(self) -> None:
         self._invalidate()
         self.request_sync()
+
+    def store(self, note: Note, vector: array) -> None:
+        """把一条笔记已经算好的（归一化过的）向量存下。录入时查重复顺带算出来的向量走这里，后台就不用再算一遍。"""
+        model = self.model()
+        if model is None or note.path is None:
+            return
+        with self.index.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO embeddings (path, text_hash, model, vector) VALUES (?, ?, ?, ?)",
+                (note.path.as_posix(), _hash(note_text(note)), model, vector.tobytes()),
+            )
+        self._invalidate()
 
     def request_sync(self) -> None:
         """笔记有变动：稍后在后台补向量。短时间内的多次请求合成一次。没配向量模型时什么都不做。"""

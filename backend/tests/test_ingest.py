@@ -9,16 +9,19 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app import settings
 from app.extract import classifier
+from app.extract import client as model_client
 from app.extract.classifier import Placement
 from app.extract.extractor import ExtractError
 from app.extract.models import Extraction, NoteDraft, TopicDraft
 from app.ingest import sources
 from app.ingest.sources import Document, SourceError
-from app.ingest import pipeline
+from app.ingest import pipeline, similar
 from app.ingest.pipeline import input_hash
 from app.ingest.queue import IngestQueue
 from app.main import create_app
+from app.search import vectors as vectors_module
 from app.vault import git
 from app.vault.store import VaultStore
 from tests.conftest import make_pdf
@@ -741,3 +744,140 @@ def test_page_that_cannot_be_fetched_fails_the_job_and_can_be_retried(
     assert client.app.state.queue.wait_idle()
     assert client.get(f"/api/jobs/{job['id']}").json()["status"] == "done"
     assert stubs.digest_calls == [("正文。" * 1000, None)]
+
+
+# ---------- 按内容找疑似重复（SCHEMA 2.5） ----------
+
+# 假的向量空间：一维一个「意思」。文字里出现哪些词，就在对应的维度上有分量
+_MEANINGS = [("微调", "SFT", "指令"), ("排序", "快排"), ("检索", "RAG"), ("对比", "流程")]
+
+
+def _fake_vector(text: str) -> list[float]:
+    return [float(sum(text.count(word) for word in words)) for words in _MEANINGS] + [0.05]
+
+
+class Similarity:
+    """假的向量接口和假的「是不是同一个概念」判断。"""
+
+    def __init__(self) -> None:
+        self.embed_calls: list[list[str]] = []
+        self.embed_error: Exception | None = None
+        self.judged: list[list[tuple[str, str]]] = []
+        self.verdict: bool | Exception = True
+
+    def embed(self, texts: list[str], override: str | None = None) -> list[list[float]]:
+        self.embed_calls.append(list(texts))
+        if self.embed_error is not None:
+            raise self.embed_error
+        return [_fake_vector(text) for text in texts]
+
+    def judge(self, pairs):
+        self.judged.append([(new.title, old.title) for new, old in pairs])
+        if isinstance(self.verdict, Exception):
+            raise self.verdict
+        return [self.verdict] * len(pairs)
+
+
+@pytest.fixture
+def similarity(monkeypatch: pytest.MonkeyPatch, isolated_settings: Path, no_placement: None) -> Similarity:
+    fake = Similarity()
+    monkeypatch.setattr(model_client, "embed_texts", fake.embed)
+    monkeypatch.setattr(similar, "judge_same_concept", fake.judge)
+    monkeypatch.setattr(vectors_module, "SYNC_DELAY_SECONDS", 0.0)
+    settings.save({"embed_model": "fake-embed"})
+    return fake
+
+
+def _settle(client: TestClient) -> None:
+    assert client.app.state.vectors.wait_idle()
+
+
+def _ingest_concepts(client: TestClient, stubs: Stubs, text: str, *concepts: NoteDraft) -> list[dict]:
+    stubs.extraction = Extraction(topic=None, concepts=list(concepts))
+    job = _ingest(client, kind="text", text=text)
+    assert job["status"] == "done", job
+    _settle(client)
+    return [*job["created"], *job["inbox"]]
+
+
+def test_differently_named_note_about_the_same_concept_is_flagged(
+    client: TestClient, vault_root: Path, stubs: Stubs, similarity: Similarity
+) -> None:
+    [old] = _ingest_concepts(client, stubs, "第一次", _concept("SFT"))
+    old_text = _read(vault_root, "SFT.md")
+    similarity.judged.clear()
+
+    new = _ingest_concepts(client, stubs, "第二次", _concept("有监督微调"), _concept("快速排序"))
+
+    # 「有监督微调」和已有的「SFT」名字不同、内容接近 → 问模型 → 是同一个概念 → 打标记
+    # 「快速排序」和谁都不接近 → 根本不去问模型
+    assert similarity.judged == [[("有监督微调", "SFT")]]
+    assert {r["title"]: r["duplicate_of"] for r in new} == {"有监督微调": old["id"], "快速排序": None}
+    assert _read(vault_root, "SFT.md") == old_text  # 已有的笔记不动（不变量 5）
+    assert client.get("/api/tree").json()["duplicates"] == 1
+
+
+def test_similar_but_different_concept_is_not_flagged(
+    client: TestClient, stubs: Stubs, similarity: Similarity
+) -> None:
+    _ingest_concepts(client, stubs, "第一次", _concept("SFT"))
+    similarity.verdict = False  # 模型说：相关，但不是同一个概念
+    [new] = _ingest_concepts(client, stubs, "第二次", _concept("指令微调的数据准备"))
+    assert similarity.judged[-1] == [("指令微调的数据准备", "SFT")]
+    assert new["duplicate_of"] is None
+
+
+def test_same_name_is_settled_without_asking_the_model(
+    client: TestClient, stubs: Stubs, similarity: Similarity
+) -> None:
+    [old] = _ingest_concepts(client, stubs, "第一次", _concept("SFT"))
+    similarity.judged.clear()
+    [new] = _ingest_concepts(client, stubs, "第二次", _concept("sft"))
+    assert new["duplicate_of"] == old["id"] and similarity.judged == []
+
+
+def test_only_existing_concept_notes_are_candidates(
+    client: TestClient, stubs: Stubs, similarity: Similarity
+) -> None:
+    # 已有的是一条**主题**笔记，内容和新概念很接近：不拿它当候选
+    stubs.extraction = Extraction(
+        topic=TopicDraft(title="微调方法对比", summary="几种微调方法。", content="SFT 与指令微调"),
+        concepts=[],
+    )
+    _ingest(client, kind="text", text="第一次")
+    _settle(client)
+    # 同一次录入里两条内容接近的新笔记，彼此也不比
+    new = _ingest_concepts(client, stubs, "第二次", _concept("有监督微调"), _concept("指令微调"))
+    assert similarity.judged == []
+    assert [r["duplicate_of"] for r in new] == [None, None]
+
+
+@pytest.mark.parametrize("broken", ["embed", "judge"])
+def test_similarity_failures_never_fail_the_ingest(
+    client: TestClient, stubs: Stubs, similarity: Similarity, broken: str
+) -> None:
+    _ingest_concepts(client, stubs, "第一次", _concept("SFT"))
+    if broken == "embed":
+        similarity.embed_error = RuntimeError("没网")
+    else:
+        similarity.verdict = RuntimeError("模型输出不合法")
+    [new] = _ingest_concepts(client, stubs, "第二次", _concept("有监督微调"))
+    assert new["duplicate_of"] is None  # 退回只按名字查，照常录入
+
+
+def test_vectors_computed_while_checking_are_not_computed_again(
+    client: TestClient, stubs: Stubs, similarity: Similarity
+) -> None:
+    _ingest_concepts(client, stubs, "一次录入两条", _concept("SFT"), _concept("快速排序"))
+    # 两条概念笔记的向量在查重复时一批算好并存下，后台不再重复算
+    assert [len(batch) for batch in similarity.embed_calls] == [2]
+    assert client.get("/api/vectors").json()["embedded"] == 2
+
+
+def test_no_similarity_check_without_an_embedding_model(
+    client: TestClient, stubs: Stubs, similarity: Similarity
+) -> None:
+    settings.save({"embed_model": ""})
+    _ingest_concepts(client, stubs, "第一次", _concept("SFT"))
+    [new] = _ingest_concepts(client, stubs, "第二次", _concept("有监督微调"))
+    assert (similarity.embed_calls, similarity.judged, new["duplicate_of"]) == ([], [], None)

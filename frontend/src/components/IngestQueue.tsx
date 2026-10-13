@@ -180,7 +180,7 @@ function JobRow({
           {suspected.length > 0 && (
             <Alert tone="info">
               <span className="flex-1">
-                其中 {suspected.length} 条和知识库里已有的笔记同名，疑似重复。
+                其中 {suspected.length} 条和知识库里已有的笔记同名或内容很接近，疑似重复。
               </span>
               <Button size="sm" onClick={() => onCompare(suspected)}>
                 对比并处理

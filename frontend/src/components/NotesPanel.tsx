@@ -490,7 +490,7 @@ export function NotesPanel({
 
         {!searching && selection.kind === "duplicates" && (
           <p className="-mt-2 text-xs text-muted-foreground">
-            这些笔记和知识库里更早的某条同名。点开一条，并排看两边的内容，再决定留哪条、都留还是合并。
+            这些笔记和知识库里更早的某条同名，或者内容很接近。点开一条，并排看两边的内容，再决定留哪条、都留还是合并。
           </p>
         )}
 

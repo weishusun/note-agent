@@ -139,7 +139,7 @@ export function DuplicateDialog({
               )}
             </h2>
             <p className="text-sm text-muted-foreground">
-              新录入的笔记和知识库里已有的一条同名。下面是它们各自的内容，由你决定怎么处理。
+              新录入的笔记和知识库里已有的一条可能是同一个概念（名字相同，或者内容很接近）。下面是它们各自的内容，由你决定怎么处理。
             </p>
           </div>
           <Button variant="ghost" size="icon-sm" aria-label="关闭" disabled={busy} onClick={onClose}>

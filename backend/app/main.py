@@ -157,6 +157,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             image=payload if job.kind == "screenshot" else None,
             file=payload if job.kind == "file" else None,
             filename=job.filename,
+            vectors=vectors,
             url=payload.decode("utf-8") if job.kind == "url" else None,
             on_stage=on_stage,
             on_progress=on_progress,
