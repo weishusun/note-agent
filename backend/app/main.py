@@ -22,6 +22,7 @@ from app.ingest.sources import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS, file_extens
 from app.ingest.web import normalize_url
 from app.organize.api import build_router as build_organize_router
 from app.organize.service import Organizer
+from app.search.graph import Graph, note_graph
 from app.search.index import SearchIndex
 from app.search.query import list_inbox, list_recent, refs_by_ids, search
 from app.settings_api import router as settings_router
@@ -294,6 +295,10 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         except Exception as exc:
             logger.exception("问答失败")
             raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}")
+
+    @app.get("/api/graph")
+    def api_graph(category: str | None = None) -> Graph:
+        return note_graph(index, category or None)
 
     @app.get("/api/notes")
     def api_notes(

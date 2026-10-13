@@ -7,6 +7,7 @@ tokenize='trigram' 不可改：FTS5 默认分词器按空格切词，中文检�
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from typing import Iterator
@@ -18,7 +19,7 @@ from app.vault.store import VaultStore
 
 logger = logging.getLogger(__name__)
 
-# 三段拼起来与 SCHEMA.md 第 4 节一字不差。分开存是因为表结构升级时只重建前后两张派生表
+# 四段拼起来与 SCHEMA.md 第 4 节一字不差。分开存是因为表结构升级时只重建派生的三张表，ingest_log 留着
 _NOTES_SQL = """
 CREATE TABLE notes (
   path              TEXT PRIMARY KEY,   -- 相对 vault 根
@@ -50,13 +51,34 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   tokenize = 'trigram'
 );
 """
-_SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL
+_LINKS_SQL = """
+CREATE TABLE links (
+  source  TEXT NOT NULL,   -- 发出链接的笔记的 path
+  target  TEXT NOT NULL,   -- [[双链]] 里写的文件名（不含 .md）；不保证那条笔记存在
+  PRIMARY KEY (source, target)
+);
+"""
+_SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL + _LINKS_SQL
 
 # 记在 PRAGMA user_version 里，与 SCHEMA.md 的版本号一致
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # fts 表里 aliases 的存储分隔符，查询层按它还原成列表做精确匹配
 ALIAS_SEP = "\n"
+
+
+# [[文件名]] 和 [[文件名|显示名]]；前面带 ! 的是嵌入素材，不是指向笔记的链接
+_LINK = re.compile(r"(?<!!)\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
+
+
+def link_targets(body: str) -> list[str]:
+    """正文里 [[双链]] 指向的文件名，去重，保持出现顺序。"""
+    seen: dict[str, None] = {}
+    for match in _LINK.finditer(body):
+        target = match.group(1).strip()
+        if target and not target.startswith("assets/"):
+            seen.setdefault(target)
+    return list(seen)
 
 
 def content_hash(note: Note) -> str:
@@ -90,7 +112,7 @@ class SearchIndex:
 
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
-        """表结构版本不符时丢弃并重建 notes / notes_fts（数据由启动时的全量重建补回）。
+        """表结构版本不符时丢弃并重建 notes / notes_fts / links（数据由启动时的全量重建补回）。
 
         ingest_log 不丢：它不是从笔记文件派生的，丢了就失去重复录入的检测。
         """
@@ -98,10 +120,12 @@ class SearchIndex:
         tables = {
             name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        if version == SCHEMA_VERSION and {"notes", "notes_fts", "ingest_log"} <= tables:
+        if version == SCHEMA_VERSION and {"notes", "notes_fts", "ingest_log", "links"} <= tables:
             return
-        conn.executescript("DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS notes_fts;")
-        conn.executescript(_NOTES_SQL + _FTS_SQL)
+        conn.executescript(
+            "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS notes_fts; DROP TABLE IF EXISTS links;"
+        )
+        conn.executescript(_NOTES_SQL + _FTS_SQL + _LINKS_SQL)
         if "ingest_log" not in tables:
             conn.executescript(_INGEST_LOG_SQL)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -146,11 +170,17 @@ class SearchIndex:
             "INSERT INTO notes_fts (path, title, aliases, summary, body) VALUES (?, ?, ?, ?, ?)",
             (path, fm.title, ALIAS_SEP.join(fm.aliases), fm.summary, note.body),
         )
+        conn.execute("DELETE FROM links WHERE source = ?", (path,))
+        conn.executemany(
+            "INSERT INTO links (source, target) VALUES (?, ?)",
+            [(path, target) for target in link_targets(note.body)],
+        )
 
     def remove_note(self, rel_path: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM notes WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM notes_fts WHERE path = ?", (rel_path,))
+            conn.execute("DELETE FROM links WHERE source = ?", (rel_path,))
 
     # ---------- 幂等日志（SCHEMA 不变量 8） ----------
 
@@ -184,6 +214,7 @@ class SearchIndex:
         with self.connect() as conn:
             conn.execute("DELETE FROM notes")
             conn.execute("DELETE FROM notes_fts")
+            conn.execute("DELETE FROM links")
             count = 0
             for rel in self.store.list_notes(include_inbox=True):
                 try:

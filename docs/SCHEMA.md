@@ -4,7 +4,10 @@
 > 实现与本文件冲突时,改实现,不改本文件。
 > 确需改本文件时,必须同一次 commit 内同步修改 `backend/app/vault/models.py`。
 
-**版本:v6**
+**版本:v7**
+v6 → v7 变更(REQUIREMENTS 第 4 步「关系图谱和思维导图」):索引新增 `links` 表,记录每条笔记正文里的 `[[双链]]`(§4);
+新增 `GET /api/graph`,返回笔记(节点)和它们之间的链接(连线),关系图谱和思维导图都从它取数据(§5)。笔记文件格式没有变化。
+
 v5 → v6 变更(REQUIREMENTS 第 3 步「录入队列、长文档、网页链接」):录入改为**持久队列**,一份一份按提交顺序处理,
 重启后接着处理(§2.7);新增 `vault/.noteagent/queue.db`(§1);`GET /api/jobs/{job_id}` 的录入任务多了 `id`、`kind`、`label`、
 `created_at`、`finished_at`,`created`/`inbox` 改为现查;新增 `GET /api/jobs`、`DELETE /api/jobs`、
@@ -455,13 +458,22 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
   path UNINDEXED, title, aliases, summary, body,
   tokenize = 'trigram'
 );
+
+CREATE TABLE links (
+  source  TEXT NOT NULL,   -- 发出链接的笔记的 path
+  target  TEXT NOT NULL,   -- [[双链]] 里写的文件名（不含 .md）；不保证那条笔记存在
+  PRIMARY KEY (source, target)
+);
 ```
 
 > **`tokenize='trigram'` 不可改成默认值。** FTS5 默认分词器按空格切词,对中文等于整段当一个 token,搜「检索增强」会一条都搜不到。trigram 做三字滑窗,中文子串检索才能工作。
 
 `rebuild_all()` 扫描 `notes/` 和 `inbox/` 两个目录。
 
-**表结构版本:**用 `PRAGMA user_version` 记录(与本文件的版本号一致,v6 = 6)。打开时版本不符就丢弃并重建 `notes` 与 `notes_fts` 两张表,
+**`links` 表**跟着笔记走:索引一条笔记时,把它正文里的 `[[文件名]]`、`[[文件名|显示名]]` 取出来整体换掉旧的;`![[assets/…]]` 是嵌入素材,不算。存的是**文件名**而不是对方的 `path` 或 `id`——对方可能还不存在,也可能之后被改名;
+对回笔记是查询时的事(§5 `GET /api/graph`)。
+
+**表结构版本:**用 `PRAGMA user_version` 记录(与本文件的版本号一致,v7 = 7)。打开时版本不符就丢弃并重建 `notes`、`notes_fts`、`links` 三张表,
 随后由启动时的全量重建补回数据。`ingest_log` **不随之丢弃**——它不是从笔记文件派生的,丢了就失去重复录入的检测。
 
 ---
@@ -587,6 +599,35 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 - 模型自身知识的补充必须单独成段并以「以下为模型补充,非知识库内容:」开头——与 §2.3 `## 待核实`
   同一个理由:模型生成的内容不能和你自己记的内容长得一样。
 - 模型调用失败返回 `502`。问答模型读环境变量 `ANSWER_MODEL`,未配置时沿用 `CLASSIFY_MODEL`。
+
+### `GET /api/graph?category=`
+
+笔记之间的链接关系。关系图谱和思维导图都从这里取数据。
+
+```jsonc
+{
+  "nodes": [
+    {
+      "path": "notes/SFT.md",          // 节点的键。旧笔记可能没有 id，所以连线用 path
+      "id": "01JQ8ZK3M7F2VYB4N6R9T0XC5E",
+      "title": "SFT",
+      "type": "concept",               // topic | concept
+      "category": "人工智能/模型训练",
+      "status": "active",
+      "outside": false                 // true：不在所选分类里，只是和里面的某条笔记有链接
+    }
+  ],
+  "edges": [ { "source": "notes/SFT.md", "target": "notes/大模型的训练流程.md" } ]
+}
+```
+
+- **连线是无向的、去重的:**A 链接了 B、B 也链接了 A,只有一条。`source` 的 `path` 按字典序小于 `target`。
+  链接里写的文件名按**大小写不敏感**对回笔记;指向不存在的笔记、指向自己的不算。
+- **不给 `category`:**全部未归档的笔记(含待整理)和它们之间的连线,`outside` 全为 `false`。
+- **`category` 是「大块」或「大块/小块」:**其中 `status=active` 的笔记(与 `GET /api/notes?category=` 同一套规则),
+  外加**和它们直接相连的块外笔记**(`outside: true`)。块外笔记彼此之间的连线不取。分类不存在时返回空图,不是 `404`。
+- `nodes` 按 `path` 排序,`edges` 按 `(source, target)` 排序。不分页:一两千条笔记的全图也就几百 KB。
+  要不要把这么多点都画出来由界面决定。
 
 ### `GET /api/notes?category=&status=&duplicates=&limit=50` → `[NoteRef]`
 
