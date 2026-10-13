@@ -15,6 +15,7 @@ import { MaximizeIcon, MinusIcon, PlusIcon } from "lucide-react"
 import { Alert } from "@/components/Alert"
 import { Button } from "@/components/ui/button"
 import { api, categoryLabel, type Graph, type GraphNode } from "@/lib/api"
+import { textWidth } from "@/lib/mindmap"
 import { usePanZoom } from "@/lib/usePanZoom"
 import { cn } from "@/lib/utils"
 
@@ -23,6 +24,7 @@ export const GRAPH_MAX_NOTES = 500
 // 点不多时每个点都带名字；多了只给主题笔记和鼠标指着的那一片带
 const LABEL_ALL_BELOW = 60
 const LABEL_CHARS = 14
+const LABEL_FONT = 11
 const LEGEND_MAX = 12
 const UNSORTED = "还没有分类"
 
@@ -121,17 +123,10 @@ function bounds(nodes: SimNode[]) {
     minX = Math.min(minX, (n.x ?? 0) - n.radius)
     minY = Math.min(minY, (n.y ?? 0) - n.radius)
     // 名字画在点的右边：把它的宽度也算进去，「看全图」时才不会被右边缘裁掉
-    maxX = Math.max(maxX, (n.x ?? 0) + n.radius + 4 + labelWidth(n.note.title))
+    maxX = Math.max(maxX, (n.x ?? 0) + n.radius + 4 + textWidth(shorten(n.note.title), LABEL_FONT))
     maxY = Math.max(maxY, (n.y ?? 0) + n.radius)
   }
   return nodes.length > 0 ? { minX, minY, maxX, maxY } : { minX: -1, minY: -1, maxX: 1, maxY: 1 }
-}
-
-// 粗略估计名字画出来有多宽：汉字约一个字号宽，字母数字约一半多
-function labelWidth(title: string): number {
-  let width = 0
-  for (const char of shorten(title)) width += char.charCodeAt(0) > 0x2e7f ? 11 : 6.5
-  return width
 }
 
 function shorten(title: string): string {
@@ -329,7 +324,7 @@ function GraphCanvas({
                     <text
                       x={node.radius + 4}
                       y={4}
-                      fontSize={11}
+                      fontSize={LABEL_FONT}
                       fill="currentColor"
                       fontWeight={note.type === "topic" ? 600 : 400}
                       // 字压在线上时用背景色描一圈边，保证看得清

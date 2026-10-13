@@ -11,6 +11,7 @@ import {
 
 import { Alert } from "@/components/Alert"
 import { GraphView } from "@/components/GraphView"
+import { MindMapView } from "@/components/MindMapView"
 import { NewNoteDialog } from "@/components/NewNoteDialog"
 import { NoteCard } from "@/components/NoteCard"
 import { Button } from "@/components/ui/button"
@@ -18,11 +19,12 @@ import { api, categoryLabel, type NoteRef, type Tree } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 // 右边怎么展示所选范围里的笔记
-export type NotesView = "list" | "graph"
+export type NotesView = "list" | "graph" | "map"
 
 const VIEWS: { id: NotesView; label: string }[] = [
   { id: "list", label: "列表" },
   { id: "graph", label: "图谱" },
+  { id: "map", label: "导图" },
 ]
 
 const SEARCH_DEBOUNCE_MS = 250
@@ -187,7 +189,7 @@ export function NotesPanel({
   }
 
   const selected = selectedPath ? findNode(tree, selectedPath) : null
-  // 图谱只对「全部笔记」和某个分类有意义；搜索、待整理、疑似重复时只有列表
+  // 图谱和导图只对「全部笔记」和某个分类有意义；搜索、待整理、疑似重复时只有列表
   const scoped = !searching && (selection.kind === "all" || selection.kind === "category")
   const shown: NotesView = scoped ? view : "list"
   const scopeCount = selectedPath ? (selected?.count ?? 0) : (tree?.total ?? 0)
@@ -496,6 +498,14 @@ export function NotesPanel({
           <GraphView
             category={selectedPath}
             count={scopeCount}
+            version={reloadKey}
+            onOpenNote={onOpenNote}
+          />
+        )}
+        {shown === "map" && (
+          <MindMapView
+            tree={tree}
+            category={selectedPath}
             version={reloadKey}
             onOpenNote={onOpenNote}
           />
