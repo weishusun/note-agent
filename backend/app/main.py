@@ -24,6 +24,7 @@ from app.organize.api import build_router as build_organize_router
 from app.organize.service import Organizer
 from app.search.graph import Graph, note_graph
 from app.search.index import SearchIndex
+from app.search.vectors import VectorIndex
 from app.search.query import list_inbox, list_recent, refs_by_ids, search
 from app.settings_api import router as settings_router
 from app.vault.models import NoteRef, SourceKind, Taxonomy
@@ -135,6 +136,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     store = VaultStore(root)
     taxonomy = TaxonomyManager(root / "taxonomy.yaml")
     index = SearchIndex(store)
+    vectors = VectorIndex(index)
     organizer = Organizer(store, taxonomy, index)
     jobs = JobRegistry()
 
@@ -181,6 +183,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
 
     app = FastAPI(title="note-agent", lifespan=lifespan)
     app.state.queue = queue
+    app.state.vectors = vectors
 
     app.include_router(settings_router)
     app.include_router(build_organize_router(organizer, jobs))
@@ -291,7 +294,7 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     @app.post("/api/ask")
     def api_ask(req: AskRequest) -> AskResult:
         try:
-            return answer_question(store, index, req.question, limit=req.limit)
+            return answer_question(store, index, req.question, limit=req.limit, vectors=vectors)
         except Exception as exc:
             logger.exception("问答失败")
             raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}")
@@ -310,6 +313,17 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         return list_recent(
             index, limit, category=category, status=status, duplicates=duplicates
         )
+
+    @app.get("/api/vectors")
+    def api_vectors() -> dict[str, object]:
+        """向量索引的状态：{enabled, model, total, embedded}。"""
+        return vectors.status()
+
+    @app.post("/api/vectors/sync", status_code=202)
+    def api_sync_vectors() -> dict[str, object]:
+        """在后台把缺的、过期的向量补上（比如刚在设置页填了向量模型）。马上返回当前状态。"""
+        vectors.request_sync()
+        return vectors.status()
 
     @app.post("/api/reindex")
     def api_reindex() -> dict[str, int]:

@@ -21,6 +21,7 @@ _TIMEOUT_SECONDS = 120.0
 # 检索词扩展只是锦上添花,慢了就放弃,不能拖住整次问答
 _EXPAND_TIMEOUT_SECONDS = 10.0
 _PROBE_TIMEOUT_SECONDS = 60.0
+_EMBED_TIMEOUT_SECONDS = 30.0
 # 整理长资料:一次调用要读一两万字、写出上千字
 _DIGEST_TIMEOUT_SECONDS = 240.0
 
@@ -112,6 +113,46 @@ def bind_json(model, schema):
     也会把整段内容塞成一个字符串。json_mode 下模型看不到 schema,提示词里必须写明要输出的 JSON 结构。
     """
     return model.with_structured_output(schema, method="json_mode", include_raw=True)
+
+
+# ---------- 向量 ----------
+
+
+def embed_texts(texts: list[str], override: str | None = None) -> list[list[float]]:
+    """把每段文字变成一个向量,顺序与 texts 一致。用设置里的向量模型,走 OpenAI 兼容的 /embeddings 接口。
+
+    不传 dimensions:各家支持的维度不一样,用模型默认的。没配向量模型、没配密钥、调用失败都抛异常。
+    """
+    from openai import OpenAI
+
+    current = settings.load()
+    name = _resolve_model(override, current.embed_model, "向量模型")
+    if not current.api_key:
+        raise RuntimeError(
+            "还没有配置 API Key:请到设置页填写,或在 note-agent/.env 里配置 ZHIPU_API_KEY"
+        )
+    api = OpenAI(
+        api_key=current.api_key,
+        base_url=current.base_url,
+        timeout=_EMBED_TIMEOUT_SECONDS,
+        max_retries=1,
+    )
+    response = api.embeddings.create(model=name, input=texts)
+    vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
+    if len(vectors) != len(texts):
+        raise RuntimeError(f"向量接口返回了 {len(vectors)} 个向量,应该是 {len(texts)} 个")
+    return vectors
+
+
+def probe_embedding() -> dict:
+    """给向量模型发一句话,返回 {ok, detail, seconds};detail 里是向量的维度。"""
+    started = time.perf_counter()
+    try:
+        [vector] = embed_texts(["测试"])
+        ok, detail = True, f"{len(vector)} 维"
+    except Exception as exc:
+        ok, detail = False, str(exc)[:300]
+    return {"ok": ok, "detail": detail, "seconds": round(time.perf_counter() - started, 1)}
 
 
 # ---------- 连接测试(设置页用) ----------

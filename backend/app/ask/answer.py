@@ -1,4 +1,7 @@
-"""检索 → 读笔记正文 → 模型作答。正文从磁盘读（SCHEMA 不变量 13：以磁盘为准）。"""
+"""检索 → 读笔记正文 → 模型作答。正文从磁盘读（SCHEMA 不变量 13：以磁盘为准）。
+
+检索是字面和向量两路合并（app/search/hybrid.py）；向量那一路不可用时只剩字面检索，问答照常。
+"""
 
 from pathlib import Path
 
@@ -7,8 +10,10 @@ from pydantic import BaseModel
 
 from app.ask.expand import expand_question
 from app.extract.client import get_answer_model
+from app.search.hybrid import retrieve
 from app.search.index import SearchIndex
-from app.search.query import note_vocabulary, retrieve_for_question
+from app.search.query import note_vocabulary
+from app.search.vectors import VectorIndex
 from app.vault.models import NoteRef
 from app.vault.store import VaultStore
 
@@ -26,12 +31,16 @@ class AskResult(BaseModel):
 
 
 def answer_question(
-    store: VaultStore, index: SearchIndex, question: str, limit: int = 5
+    store: VaultStore,
+    index: SearchIndex,
+    question: str,
+    limit: int = 5,
+    vectors: VectorIndex | None = None,
 ) -> AskResult:
     keywords = expand_question(question, note_vocabulary(index))
     sources: list[NoteRef] = []
     blocks: list[str] = []
-    for ref in retrieve_for_question(index, question, limit, keywords=keywords):
+    for ref in retrieve(index, vectors, question, limit, keywords=keywords):
         try:
             note = store.read_note(ref.path)
         except (FileNotFoundError, ValueError):

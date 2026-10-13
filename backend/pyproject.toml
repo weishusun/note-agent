@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28.1",
     "langchain-openai>=1.4.1",
     "langgraph>=1.2.10",
+    "openai>=2.51.0",
     "pydantic>=2.13.4",
     "pypdf>=6.20.1",
     "python-dotenv>=1.2.2",

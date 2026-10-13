@@ -3,7 +3,13 @@ import { CheckIcon, XIcon } from "lucide-react"
 
 import { Alert } from "@/components/Alert"
 import { Button } from "@/components/ui/button"
-import { api, type ProbeResult, type SettingsUpdate, type SettingsView } from "@/lib/api"
+import {
+  api,
+  type ProbeResult,
+  type SettingsUpdate,
+  type SettingsView,
+  type VectorStatus,
+} from "@/lib/api"
 
 type Form = Omit<SettingsView, "api_key_set" | "api_key_hint"> & { api_key: string }
 
@@ -17,6 +23,7 @@ function toForm(view: SettingsView): Form {
     extract_model: view.extract_model,
     classify_model: view.classify_model,
     answer_model: view.answer_model,
+    embed_model: view.embed_model,
     disable_thinking: view.disable_thinking,
     extract_disable_thinking: view.extract_disable_thinking,
   }
@@ -28,7 +35,39 @@ export function SettingsPanel({ active }: { active: boolean }) {
   const [busy, setBusy] = useState<"save" | "test" | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [probes, setProbes] = useState<{ text: ProbeResult; vision: ProbeResult } | null>(null)
+  const [probes, setProbes] = useState<{
+    text: ProbeResult
+    vision: ProbeResult
+    embedding?: ProbeResult
+  } | null>(null)
+  const [vectors, setVectors] = useState<VectorStatus | null>(null)
+  // 每保存一次递增：让向量索引的进度重新开始轮询
+  const [vectorsKey, setVectorsKey] = useState(0)
+
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let tries = 0
+    // 先让后端把缺的向量补上，再每两秒看一次进度，补齐了（或看了一分钟）就停
+    const poll = (first: boolean) => {
+      ;(first ? api.syncVectors() : api.vectors()).then(
+        (status) => {
+          if (cancelled) return
+          setVectors(status)
+          if (status.enabled && status.embedded < status.total && ++tries < 30) {
+            timer = setTimeout(() => poll(false), 2000)
+          }
+        },
+        () => undefined,
+      )
+    }
+    poll(true)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [active, vectorsKey])
 
   useEffect(() => {
     if (!active || saved) return
@@ -65,6 +104,7 @@ export function SettingsPanel({ active }: { active: boolean }) {
       setSaved(view)
       setForm(toForm(view))
       setError(null)
+      setVectorsKey((k) => k + 1)
       return true
     } catch (e) {
       setError((e as Error).message)
@@ -163,6 +203,27 @@ export function SettingsPanel({ active }: { active: boolean }) {
         )}
       </Field>
 
+      <Field
+        label="向量模型"
+        hint="用于向量检索：提问时换个说法也能搜到，录入时能发现名字不同但内容相近的重复笔记。留空则只做字面检索。模型名见服务商的文档（README 里有智谱的）。"
+      >
+        {(id) => (
+          <input
+            id={id}
+            className={INPUT}
+            value={form.embed_model}
+            onChange={(e) => set("embed_model", e.target.value)}
+            placeholder="未设置"
+          />
+        )}
+      </Field>
+      {vectors?.enabled && (
+        <p role="status" className="-mt-3 text-xs text-muted-foreground">
+          向量索引：{vectors.total} 条笔记里已有 {vectors.embedded} 条算好了向量
+          {vectors.embedded < vectors.total ? "，其余的正在后台计算…" : "。"}
+        </p>
+      )}
+
       <fieldset className="flex flex-col gap-3 rounded-lg border p-3">
         <legend className="px-1 text-xs text-muted-foreground">高级</legend>
         <Check
@@ -198,6 +259,9 @@ export function SettingsPanel({ active }: { active: boolean }) {
         <ul className="flex flex-col gap-2" aria-label="连接测试结果">
           <Probe name="分类模型（文本）" result={probes.text} />
           <Probe name="提取模型（看图）" result={probes.vision} />
+          {probes.embedding && (
+            <Probe name="向量模型" result={probes.embedding} detailLabel="向量维度" />
+          )}
         </ul>
       )}
     </form>
@@ -252,7 +316,15 @@ function Check({
   )
 }
 
-function Probe({ name, result }: { name: string; result: ProbeResult }) {
+function Probe({
+  name,
+  result,
+  detailLabel = "模型回复",
+}: {
+  name: string
+  result: ProbeResult
+  detailLabel?: string
+}) {
   return (
     <li className="flex items-start gap-2 rounded-lg border p-3 text-sm">
       {result.ok ? (
@@ -266,7 +338,7 @@ function Probe({ name, result }: { name: string; result: ProbeResult }) {
         </span>
         <span className="ml-2 text-xs text-muted-foreground">{result.seconds} 秒</span>
         <span className="mt-0.5 block text-xs break-words text-muted-foreground">
-          {result.ok ? `模型回复：${result.detail}` : result.detail}
+          {result.ok ? `${detailLabel}：${result.detail}` : result.detail}
         </span>
       </span>
     </li>

@@ -112,6 +112,8 @@ export interface SettingsView {
   extract_model: string
   classify_model: string
   answer_model: string
+  // 留空则不做向量检索
+  embed_model: string
   disable_thinking: boolean
   extract_disable_thinking: boolean
 }
@@ -120,6 +122,14 @@ export interface SettingsView {
 export type SettingsUpdate = Partial<
   Omit<SettingsView, "api_key_set" | "api_key_hint"> & { api_key: string }
 >
+
+// 向量索引的进度：total 条笔记里有 embedded 条已经算好了向量
+export interface VectorStatus {
+  enabled: boolean
+  model: string | null
+  total: number
+  embedded: number
+}
 
 export interface ProbeResult {
   ok: boolean
@@ -262,6 +272,13 @@ export const api = {
 
   settings: () => request<SettingsView>("/api/settings"),
   saveSettings: (update: SettingsUpdate) => send<SettingsView>("PUT", "/api/settings", update),
+  // 没填向量模型时结果里没有 embedding
   testSettings: () =>
-    post<{ text: ProbeResult; vision: ProbeResult }>("/api/settings/test", {}),
+    post<{ text: ProbeResult; vision: ProbeResult; embedding?: ProbeResult }>(
+      "/api/settings/test",
+      {},
+    ),
+  vectors: () => request<VectorStatus>("/api/vectors"),
+  // 在后台把缺的向量补上，马上返回当前进度
+  syncVectors: () => post<VectorStatus>("/api/vectors/sync", {}),
 }

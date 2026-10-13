@@ -24,6 +24,8 @@ class Settings(BaseModel):
     classify_model: str | None
     # 留空则沿用 classify_model
     answer_model: str | None
+    # 向量模型：留空则不做向量检索，只做字面检索
+    embed_model: str | None
     # 分类、压缩、检索词扩展这类小调用是否关闭思考（智谱专有参数）
     disable_thinking: bool
     # 看图提取是否也关闭思考，默认关。实测开着思考一张图要 100 秒以上，还会把无关紧要的东西
@@ -47,6 +49,7 @@ def _env_defaults() -> dict:
         "extract_model": config.EXTRACT_MODEL,
         "classify_model": config.CLASSIFY_MODEL,
         "answer_model": os.environ.get("ANSWER_MODEL") or None,
+        "embed_model": os.environ.get("EMBED_MODEL") or None,
         "disable_thinking": config.DISABLE_THINKING,
         "extract_disable_thinking": True,
     }

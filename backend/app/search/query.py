@@ -77,13 +77,23 @@ def list_inbox(index: SearchIndex) -> list[NoteRef]:
 def retrieve_for_question(
     index: SearchIndex, question: str, limit: int = 5, keywords: Sequence[str] = ()
 ) -> list[NoteRef]:
-    """给问答用的召回：输入是一句自然语言问题，不是关键词。
+    """retrieve_ranked 的结果，不带「是否弱命中」。"""
+    return [ref for ref, _weak in retrieve_ranked(index, question, limit, keywords)]
+
+
+def retrieve_ranked(
+    index: SearchIndex, question: str, limit: int = 5, keywords: Sequence[str] = ()
+) -> list[tuple[NoteRef, bool]]:
+    """给问答用的字面召回：输入是一句自然语言问题，不是关键词。返回 [(笔记, 是否只是弱命中)]。
 
     search() 把 q 当整句短语去匹配，问句几乎必然零命中，所以这里换一套，按优先级：
     ① 问题里**包含**某条笔记的标题 ② 问题里包含它的别名，或某个 keyword 正好就是它的标题
     ③ keywords（模型为问题扩展出的检索词）与标题/别名互相包含，命中的词越多越靠前
     ④ 把问题切成三字片段、连同 keywords 做 FTS OR 查询。
     inbox 笔记照常参与（冷启动时所有笔记都在 inbox），只排除 archived。
+
+    弱命中 = 只在第 ④ 档命中。问题里「让模型」「怎么做」这类碎片到处都是，这种命中很可能不相干；
+    混合检索（app/search/hybrid.py）会拿向量再筛它一遍。
     """
     question = (question or "").strip()
     if not question:
@@ -140,7 +150,7 @@ def retrieve_for_question(
         if path in rows and rows[path]["status"] != "archived"
     ]
     scored.sort(key=lambda item: item[0])
-    return [ref for _key, ref in scored[:limit]]
+    return [(ref, key[0] == _Q_RANK_FTS) for key, ref in scored[:limit]]
 
 
 def list_recent(
@@ -240,6 +250,15 @@ def refs_by_ids(index: SearchIndex, ids: list[str]) -> list[NoteRef]:
         )
         by_id = {row["id"]: row for row in _dict_rows(cursor)}
     return [_to_ref(by_id[i]) for i in ids if i in by_id]
+
+
+def refs_by_paths(index: SearchIndex, paths: list[str]) -> list[NoteRef]:
+    """按 path 取 NoteRef，顺序与 paths 一致；索引里没有的、已归档的略过。"""
+    if not paths:
+        return []
+    with index.connect() as conn:
+        rows = _fetch_rows(conn, paths)
+    return [_to_ref(rows[p]) for p in paths if p in rows and rows[p]["status"] != "archived"]
 
 
 def find_by_id(index: SearchIndex, note_id: str) -> NoteRef | None:

@@ -88,6 +88,7 @@ def test_get_settings_never_returns_the_key(client: TestClient) -> None:
         "extract_model",
         "classify_model",
         "answer_model",
+        "embed_model",
         "disable_thinking",
         "extract_disable_thinking",
     }

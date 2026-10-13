@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import sqlite3
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -19,7 +20,8 @@ from app.vault.store import VaultStore
 
 logger = logging.getLogger(__name__)
 
-# 四段拼起来与 SCHEMA.md 第 4 节一字不差。分开存是因为表结构升级时只重建派生的三张表，ingest_log 留着
+# 五段拼起来与 SCHEMA.md 第 4 节一字不差。分开存是因为表结构升级时只重建 notes / notes_fts / links 三张表，
+# ingest_log 和 embeddings 留着：前者不是派生物，后者重算要调用接口
 _NOTES_SQL = """
 CREATE TABLE notes (
   path              TEXT PRIMARY KEY,   -- 相对 vault 根
@@ -58,10 +60,18 @@ CREATE TABLE links (
   PRIMARY KEY (source, target)
 );
 """
-_SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL + _LINKS_SQL
+_EMBEDDINGS_SQL = """
+CREATE TABLE embeddings (
+  path       TEXT PRIMARY KEY,   -- 对应 notes.path
+  text_hash  TEXT NOT NULL,      -- 算向量时用的那段文字的 SHA256；笔记改了它就对不上，说明该重算
+  model      TEXT NOT NULL,      -- 用的向量模型；换了模型全部重算
+  vector     BLOB NOT NULL       -- float32，已归一化
+);
+"""
+_SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL + _LINKS_SQL + _EMBEDDINGS_SQL
 
 # 记在 PRAGMA user_version 里，与 SCHEMA.md 的版本号一致
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # fts 表里 aliases 的存储分隔符，查询层按它还原成列表做精确匹配
 ALIAS_SEP = "\n"
@@ -90,6 +100,18 @@ class SearchIndex:
     def __init__(self, store: VaultStore) -> None:
         self.store = store
         self.db_path = store.state_dir / "index.db"
+        self._listeners: list[Callable[[], None]] = []
+
+    def subscribe(self, listener: Callable[[], None]) -> None:
+        """索引里的笔记有增删改时（提交之后）调用 listener。向量索引靠它知道该补算了。"""
+        self._listeners.append(listener)
+
+    def _notify(self) -> None:
+        for listener in self._listeners:
+            try:
+                listener()
+            except Exception:
+                logger.exception("索引变动的通知处理失败")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -115,12 +137,14 @@ class SearchIndex:
         """表结构版本不符时丢弃并重建 notes / notes_fts / links（数据由启动时的全量重建补回）。
 
         ingest_log 不丢：它不是从笔记文件派生的，丢了就失去重复录入的检测。
+        embeddings 也不丢：重算要调用接口；哪些过期了由 text_hash 判断，和表结构版本无关。
         """
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         tables = {
             name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        if version == SCHEMA_VERSION and {"notes", "notes_fts", "ingest_log", "links"} <= tables:
+        expected = {"notes", "notes_fts", "ingest_log", "links", "embeddings"}
+        if version == SCHEMA_VERSION and expected <= tables:
             return
         conn.executescript(
             "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS notes_fts; DROP TABLE IF EXISTS links;"
@@ -128,6 +152,8 @@ class SearchIndex:
         conn.executescript(_NOTES_SQL + _FTS_SQL + _LINKS_SQL)
         if "ingest_log" not in tables:
             conn.executescript(_INGEST_LOG_SQL)
+        if "embeddings" not in tables:
+            conn.executescript(_EMBEDDINGS_SQL)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ---------- 写入 ----------
@@ -135,6 +161,7 @@ class SearchIndex:
     def upsert_note(self, note: Note) -> None:
         with self.connect() as conn:
             self._upsert(conn, note)
+        self._notify()
 
     @staticmethod
     def _upsert(conn: sqlite3.Connection, note: Note) -> None:
@@ -181,6 +208,7 @@ class SearchIndex:
             conn.execute("DELETE FROM notes WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM notes_fts WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM links WHERE source = ?", (rel_path,))
+        self._notify()
 
     # ---------- 幂等日志（SCHEMA 不变量 8） ----------
 
@@ -224,4 +252,5 @@ class SearchIndex:
                     logger.warning("重建索引时跳过 %s: %s", rel.as_posix(), exc)
                     continue
                 count += 1
-            return count
+        self._notify()
+        return count

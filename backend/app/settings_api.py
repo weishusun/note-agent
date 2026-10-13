@@ -19,6 +19,7 @@ class SettingsView(BaseModel):
     extract_model: str
     classify_model: str
     answer_model: str
+    embed_model: str
     disable_thinking: bool
     extract_disable_thinking: bool
 
@@ -33,10 +34,13 @@ class SettingsUpdate(BaseModel):
     extract_model: str | None = None
     classify_model: str | None = None
     answer_model: str | None = None
+    embed_model: str | None = None
     disable_thinking: bool | None = None
     extract_disable_thinking: bool | None = None
 
-    @field_validator("base_url", "api_key", "extract_model", "classify_model", "answer_model")
+    @field_validator(
+        "base_url", "api_key", "extract_model", "classify_model", "answer_model", "embed_model"
+    )
     @classmethod
     def _strip(cls, v: str | None) -> str | None:
         return v.strip() if v is not None else None
@@ -58,6 +62,7 @@ def _view(current: settings.Settings) -> SettingsView:
         extract_model=current.extract_model or "",
         classify_model=current.classify_model or "",
         answer_model=current.answer_model or "",
+        embed_model=current.embed_model or "",
         disable_thinking=current.disable_thinking,
         extract_disable_thinking=current.extract_disable_thinking,
     )
@@ -78,5 +83,11 @@ def put_settings(req: SettingsUpdate) -> SettingsView:
 
 @router.post("/api/settings/test")
 def test_settings() -> dict[str, dict]:
-    """用当前已保存的设置各发一次真实请求：文本模型一句话，提取模型一张小图。"""
-    return {"text": client.probe_text(), "vision": client.probe_vision()}
+    """用当前已保存的设置各发一次真实请求：文本模型一句话，提取模型一张小图，向量模型一句话。
+
+    向量模型没填时不测它，结果里没有 embedding 这一项。
+    """
+    result = {"text": client.probe_text(), "vision": client.probe_vision()}
+    if settings.load().embed_model:
+        result["embedding"] = client.probe_embedding()
+    return result
