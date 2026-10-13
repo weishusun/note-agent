@@ -86,6 +86,25 @@ export interface Tree {
   categories: TreeParent[]
 }
 
+// 关系图谱和思维导图的数据（SCHEMA GET /api/graph）
+export interface GraphNode {
+  // 节点的键：旧笔记可能没有 id
+  path: string
+  id: string | null
+  title: string
+  type: NoteRef["type"]
+  category: string | null
+  status: NoteRef["status"]
+  // 不在所选分类里，只是和里面的某条笔记有链接
+  outside: boolean
+}
+
+export interface Graph {
+  nodes: GraphNode[]
+  // 无向、去重；source 和 target 都是节点的 path
+  edges: { source: string; target: string }[]
+}
+
 export interface SettingsView {
   base_url: string
   api_key_set: boolean
@@ -225,6 +244,10 @@ export const api = {
     post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/merge`, { into }),
   keepNote: (id: string) => post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/keep`, {}),
   ref: (id: string) => request<NoteRef>(`/api/refs/${encodeURIComponent(id)}`),
+
+  // category 是「大块」或「大块/小块」；不给就是全部笔记
+  graph: (category: string | null) =>
+    request<Graph>(`/api/graph?${query({ category: category ?? undefined })}`),
 
   // 分类：路径里有中文和「/」，一律放在请求体或查询参数里
   tree: () => request<Tree>("/api/tree"),

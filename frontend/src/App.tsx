@@ -4,7 +4,7 @@ import { AskPanel } from "@/components/AskPanel"
 import { DuplicateDialog } from "@/components/DuplicateDialog"
 import { IngestPanel } from "@/components/IngestPanel"
 import { NoteDialog } from "@/components/NoteDialog"
-import { NotesPanel } from "@/components/NotesPanel"
+import { NotesPanel, type NotesView } from "@/components/NotesPanel"
 import { SettingsPanel } from "@/components/SettingsPanel"
 import { linkTarget, type IngestJob, type NoteRef, type NoteTarget } from "@/lib/api"
 import { useIngestJobs } from "@/lib/useIngestJobs"
@@ -35,9 +35,12 @@ function App() {
   const [notesVersion, setNotesVersion] = useState(0)
   const noteChanged = useCallback(() => setNotesVersion((v) => v + 1), [])
   const openRef = useCallback(
-    (note: NoteRef) => setOpenNote({ title: note.title, paths: [note.path] }),
+    (note: Pick<NoteRef, "title" | "path">) =>
+      setOpenNote({ title: note.title, paths: [note.path] }),
     [],
   )
+  // 笔记页当前是列表、图谱还是导图：后两种要更宽的页面
+  const [notesView, setNotesView] = useState<NotesView>("list")
   const openLink = useCallback((stem: string) => setOpenNote(linkTarget(stem)), [])
   const closeNote = useCallback(() => setOpenNote(null), [])
   // 等着并排对比的疑似重复笔记的 id，第一条是正在看的
@@ -72,8 +75,8 @@ function App() {
     <div
       className={cn(
         "mx-auto flex min-h-svh flex-col gap-6 px-4 py-8",
-        // 笔记页左边有目录树，需要更宽
-        tab === "notes" ? "max-w-5xl" : "max-w-2xl",
+        // 笔记页左边有目录树，需要更宽；图谱和导图是画布，再宽一些
+        tab !== "notes" ? "max-w-2xl" : notesView === "list" ? "max-w-5xl" : "max-w-7xl",
       )}
     >
       <header className="flex items-center justify-between">
@@ -124,6 +127,8 @@ function App() {
           <NotesPanel
             active={tab === "notes"}
             version={notesVersion}
+            view={notesView}
+            onViewChange={setNotesView}
             onOpenNote={openRef}
             onCompare={openCompare}
           />

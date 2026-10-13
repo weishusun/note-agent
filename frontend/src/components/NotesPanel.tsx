@@ -10,11 +10,20 @@ import {
 } from "lucide-react"
 
 import { Alert } from "@/components/Alert"
+import { GraphView } from "@/components/GraphView"
 import { NewNoteDialog } from "@/components/NewNoteDialog"
 import { NoteCard } from "@/components/NoteCard"
 import { Button } from "@/components/ui/button"
 import { api, categoryLabel, type NoteRef, type Tree } from "@/lib/api"
 import { cn } from "@/lib/utils"
+
+// 右边怎么展示所选范围里的笔记
+export type NotesView = "list" | "graph"
+
+const VIEWS: { id: NotesView; label: string }[] = [
+  { id: "list", label: "列表" },
+  { id: "graph", label: "图谱" },
+]
 
 const SEARCH_DEBOUNCE_MS = 250
 const JOB_POLL_MS = 600
@@ -33,13 +42,17 @@ const INPUT =
 export function NotesPanel({
   active,
   version,
+  view,
+  onViewChange,
   onOpenNote,
   onCompare,
 }: {
   active: boolean
   // 别处改了笔记的分类（比如在笔记弹窗里）时递增，让这里重新加载
   version: number
-  onOpenNote: (note: NoteRef) => void
+  view: NotesView
+  onViewChange: (view: NotesView) => void
+  onOpenNote: (note: Pick<NoteRef, "title" | "path">) => void
   // 并排对比这些疑似重复的笔记，一条一条来
   onCompare: (ids: string[]) => void
 }) {
@@ -174,6 +187,10 @@ export function NotesPanel({
   }
 
   const selected = selectedPath ? findNode(tree, selectedPath) : null
+  // 图谱只对「全部笔记」和某个分类有意义；搜索、待整理、疑似重复时只有列表
+  const scoped = !searching && (selection.kind === "all" || selection.kind === "category")
+  const shown: NotesView = scoped ? view : "list"
+  const scopeCount = selectedPath ? (selected?.count ?? 0) : (tree?.total ?? 0)
   const reclassifying = progress !== null
   const disabled = busy || reclassifying
 
@@ -416,6 +433,25 @@ export function NotesPanel({
                   </Button>
                 </>
               )}
+              {scoped && (
+                <div role="tablist" aria-label="展示方式" className="flex gap-0.5 rounded-lg bg-muted p-0.5">
+                  {VIEWS.map((v) => (
+                    <button
+                      key={v.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={shown === v.id}
+                      onClick={() => onViewChange(v.id)}
+                      className={cn(
+                        "rounded-md px-2.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none",
+                        shown === v.id && "bg-background text-foreground shadow-sm",
+                      )}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               {selection.kind === "duplicates" && !!notes?.length && (
                 <Button
                   size="sm"
@@ -456,7 +492,15 @@ export function NotesPanel({
           </p>
         )}
 
-        {notes?.length === 0 && (
+        {shown === "graph" && (
+          <GraphView
+            category={selectedPath}
+            count={scopeCount}
+            version={reloadKey}
+            onOpenNote={onOpenNote}
+          />
+        )}
+        {shown === "list" && notes?.length === 0 && (
           <p className="text-sm text-muted-foreground">
             {searching
               ? "没有匹配的笔记。搜索是按字面匹配的，换个词试试，或者到「提问」页用一句话来问。"
@@ -465,18 +509,19 @@ export function NotesPanel({
                 : "这里还没有笔记。"}
           </p>
         )}
-        {notes?.map((note) => (
-          <NoteCard
-            key={note.path}
-            note={note}
-            onOpen={
-              // 在「疑似重复」里点开就是要处理它：直接进并排对比
-              !searching && selection.kind === "duplicates" && note.id
-                ? () => onCompare([note.id!])
-                : onOpenNote
-            }
-          />
-        ))}
+        {shown === "list" &&
+          notes?.map((note) => (
+            <NoteCard
+              key={note.path}
+              note={note}
+              onOpen={
+                // 在「疑似重复」里点开就是要处理它：直接进并排对比
+                !searching && selection.kind === "duplicates" && note.id
+                  ? () => onCompare([note.id!])
+                  : onOpenNote
+              }
+            />
+          ))}
       </div>
 
       {creating && (
