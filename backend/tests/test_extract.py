@@ -441,6 +441,14 @@ def test_supplement_is_trimmed_like_other_fields(monkeypatch: pytest.MonkeyPatch
     assert extraction.concepts[0].supplement == ["甲", "乙", "丙", "丁"]  # 去空、去重、最多 4 条
 
 
+def test_placeholder_supplements_are_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实接口上见过：没什么可补充时，模型把提示词里的话或一句「无」填了进来。"""
+    wire = _wire(None, _concept(supplement=["不是来自用户的资料", "无", "暂无补充。", "LoRA 即低秩适配"]))
+    _patch_extract(monkeypatch, [_ok(wire)])
+    extraction, _usage = extractor.extract_drafts(None, "文本")
+    assert extraction.concepts[0].supplement == ["LoRA 即低秩适配"]
+
+
 def test_extraction_always_uses_json_mode_and_spells_out_the_format(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

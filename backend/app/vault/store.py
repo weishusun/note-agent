@@ -279,10 +279,13 @@ class VaultStore:
         with open(target, "rb") as f:
             return f.read()
 
-    def save_asset(self, data: bytes, ext: str) -> str:
-        """存入 assets/，返回相对 vault 根的 posix 路径，如 assets/2026-07-30-142211.png。"""
+    def save_asset(self, data: bytes, ext: str, name: str | None = None) -> str:
+        """存入 assets/，返回相对 vault 根的 posix 路径，如 assets/2026-07-30-142211.png。
+
+        name 给了（上传的文件）就用它当文件名，重名时加序号；不给就按时间起名。
+        """
         suffix = "." + ext.lstrip(".").lower()
-        stem = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        stem = sanitize_filename(name) if name else datetime.now().strftime("%Y-%m-%d-%H%M%S")
         target = self._unique_path(self.assets_dir, stem, suffix)
         try:
             self._atomic_write_bytes(target, data)

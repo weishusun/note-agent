@@ -19,7 +19,7 @@ class Handler:
         self.gate.set()
         self.started = threading.Event()
 
-    def __call__(self, job: QueuedJob, on_stage) -> list[str]:
+    def __call__(self, job: QueuedJob, on_stage, on_progress) -> list[str]:
         self.started.set()
         assert self.gate.wait(5), "测试没有放行"
         self.seen.append((job.label, job.payload, job.force))

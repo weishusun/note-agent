@@ -1,4 +1,8 @@
-"""录入流水线：拆分 → 归类 → 写入（落盘、入索引、git 提交）。顺序执行，只新建不修改。"""
+"""录入流水线：解析 → 拆分 → 归类 → 写入（落盘、入索引、git 提交）。顺序执行，只新建不修改。
+
+输入分两路（SCHEMA 2.4）：截图和短文本交给 extractor，保留原结构；
+长文本和文件先读成纯文本，再交给 digest 做摘要级整理。两路的产出形状相同，之后的步骤共用。
+"""
 
 import hashlib
 import logging
@@ -7,8 +11,11 @@ import time
 from collections.abc import Callable
 
 from app.extract.classifier import NoteBrief
+from app.extract.digest import digest_document
 from app.extract.extractor import _image_mime, extract_drafts
+from app.extract.models import Extraction
 from app.ingest.assemble import assemble_concept, assemble_topic
+from app.ingest.sources import read_document
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
 from app.search.query import find_same_name
@@ -18,7 +25,7 @@ from app.vault.store import VaultStore, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
-# SCHEMA 2.4：不足此长度才算短文本，更长的走 kind=file（暂未支持）
+# SCHEMA 2.4：不足此长度算短文本，保留原结构；达到或超过的按长资料做摘要级整理
 SHORT_TEXT_MAX_CHARS = 2000
 
 
@@ -35,29 +42,88 @@ def run_ingest(
     kind: SourceKind,
     text: str | None = None,
     image: bytes | None = None,
+    file: bytes | None = None,
+    filename: str | None = None,
     on_stage: Callable[[str], None] = lambda stage: None,
+    on_progress: Callable[[int, int], None] = lambda done, total: None,
 ) -> list[str]:
-    """处理一次输入，返回新建笔记的 id：有主题笔记时它排第一，其后是概念笔记。"""
+    """处理一次输入，返回新建笔记的 id：有主题笔记时它排第一，其后是概念笔记。
+
+    kind=file 时给 file 和 filename；其余给 text 或 image。
+    on_progress 只在长资料分段整理时调用：(已整理的段数, 总段数)。
+    """
     started = time.perf_counter()
-    on_stage("拆分")
-    extraction, _usage = extract_drafts(image, text)
-    topic, concepts = extraction.topic, extraction.concepts
+    # 原始输入怎么留底：截图、文件存进 assets/；长文本也存成一个 .txt（正文里放不下）
+    asset: tuple[bytes, str, str | None] | None = None  # (内容, 扩展名, 文件名)
+    if kind == "file":
+        if file is None or not filename:
+            raise ValueError("kind=file 需要 file 和 filename")
+        on_stage("解析")
+        document = read_document(filename, file)
+        on_stage("拆分")
+        extraction, _info = digest_document(
+            document.text, title_hint=document.title, on_progress=on_progress
+        )
+        asset = (file, document.ext, document.title)
+        text = None
+    elif image is None and text is not None and len(text.strip()) >= SHORT_TEXT_MAX_CHARS:
+        on_stage("拆分")
+        extraction, _info = digest_document(text, on_progress=on_progress)
+        asset = (text.strip().encode("utf-8"), "txt", None)
+    else:
+        on_stage("拆分")
+        extraction, _usage = extract_drafts(image, text)
+        if image is not None:
+            asset = (image, _image_mime(image).split("/")[1], None)
     extracted = time.perf_counter()
 
     on_stage("分类")
-    # 这份输入产出的所有笔记在一次调用里一起归类；归类失败不会抛，分不上的进待整理
-    briefs = [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in concepts]
-    if topic is not None:
-        briefs.insert(0, NoteBrief(title=topic.title, summary=topic.summary))
-    placements = organizer.classify(briefs)
-    topic_placement = placements.pop(0) if topic is not None else None
+    placements = _classify(organizer, extraction)
     classified = time.perf_counter()
 
     on_stage("写入")
     # 素材放到模型调用成功之后再存，提取失败时不在 assets/ 留孤儿文件
-    asset_path = None
-    if image is not None:
-        asset_path = store.save_asset(image, _image_mime(image).split("/")[1])
+    asset_path = store.save_asset(asset[0], asset[1], name=asset[2]) if asset is not None else None
+    ids = _write(store, index, extraction, placements, kind=kind, asset_path=asset_path, text=text)
+
+    # 笔记已落盘，提交失败（如 vault 不是 git 仓库）不应让整次录入算失败
+    try:
+        git.commit(store.root, f"note: 新建 {len(ids)} 条 (来源 {kind})")
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logger.warning("vault git 提交失败，笔记已写入但未提交: %s", exc)
+    logger.info(
+        "录入完成: %d 条, 拆分 %.1fs, 分类 %.1fs, 写入 %.1fs",
+        len(ids),
+        extracted - started,
+        classified - extracted,
+        time.perf_counter() - classified,
+    )
+    return ids
+
+
+Placement = tuple[str | None, float]
+
+
+def _classify(organizer: Organizer, extraction: Extraction) -> list[Placement]:
+    """这份输入产出的所有笔记在一次调用里一起归类：主题笔记（如果有）排第一。归类失败不会抛，分不上的进待整理。"""
+    briefs = [NoteBrief(title=d.title, summary=d.summary, points=d.points) for d in extraction.concepts]
+    if extraction.topic is not None:
+        briefs.insert(0, NoteBrief(title=extraction.topic.title, summary=extraction.topic.summary))
+    return organizer.classify(briefs)
+
+
+def _write(
+    store: VaultStore,
+    index: SearchIndex,
+    extraction: Extraction,
+    placements: list[Placement],
+    *,
+    kind: SourceKind,
+    asset_path: str | None,
+    text: str | None,
+) -> list[str]:
+    topic, concepts = extraction.topic, extraction.concepts
+    topic_placement = placements.pop(0) if topic is not None else None
     link_targets = {p.stem for p in store.list_notes(include_inbox=True)}
     link_targets.update(sanitize_filename(d.title) for d in concepts)
 
@@ -106,17 +172,4 @@ def run_ingest(
                         body=concept.body.replace(f"[[{topic_stem}]]", f"[[{actual_stem}]]"),
                     )
                     index.upsert_note(fixed)
-
-    # 笔记已落盘，提交失败（如 vault 不是 git 仓库）不应让整次录入算失败
-    try:
-        git.commit(store.root, f"note: 新建 {len(ids)} 条 (来源 {kind})")
-    except (subprocess.CalledProcessError, OSError) as exc:
-        logger.warning("vault git 提交失败，笔记已写入但未提交: %s", exc)
-    logger.info(
-        "录入完成: %d 条, 拆分 %.1fs, 分类 %.1fs, 写入 %.1fs",
-        len(ids),
-        extracted - started,
-        classified - extracted,
-        time.perf_counter() - classified,
-    )
     return ids

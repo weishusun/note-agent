@@ -127,6 +127,8 @@ export function linkTarget(stem: string): NoteTarget {
 export type IngestInput =
   | { kind: "text"; text: string; force?: boolean }
   | { kind: "screenshot"; image_b64: string; force?: boolean }
+  // PDF、Markdown、纯文本。file_b64 可以带 data URL 前缀
+  | { kind: "file"; file_b64: string; filename: string; force?: boolean }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let resp: Response

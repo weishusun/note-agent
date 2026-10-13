@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   duplicate    INTEGER NOT NULL,   -- 1 = 这份输入之前录入过，note_ids 是当时的结果
   force        INTEGER NOT NULL,   -- 1 = 使用者要求重新处理，跳过幂等检查
   error        TEXT,
+  progress     TEXT,               -- JSON [done, total]；只有长资料分段整理时有
   created_at   TEXT NOT NULL,
   queued_at    TEXT NOT NULL,      -- 排队顺序；重试时更新
   finished_at  TEXT
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 """
 _COLUMNS = (
     "id, kind, label, filename, input_hash, status, stage, note_ids, duplicate, force,"
-    " error, created_at, finished_at"
+    " error, progress, created_at, finished_at"
 )
 FIRST_STAGE = "解析"
 # 处理完的任务只留最近这么多条，更早的记录自动清掉
@@ -64,6 +65,8 @@ class QueuedJob:
     error: str | None
     created_at: str
     finished_at: str | None
+    # (已完成, 总数)：长资料分段整理到第几段了
+    progress: tuple[int, int] | None = None
     # 只有交给 handler 处理时才带上；列表和查询不读它
     payload: bytes | None = None
 
@@ -76,8 +79,8 @@ class JobNotRetryable(Exception):
     """任务不在可以重试的状态，或者它的输入已经不在了。"""
 
 
-# (任务, 报告阶段的回调) -> 新建笔记的 id
-Handler = Callable[[QueuedJob, Callable[[str], None]], list[str]]
+# (任务, 报告阶段的回调, 报告进度的回调) -> 新建笔记的 id
+Handler = Callable[[QueuedJob, Callable[[str], None], Callable[[int, int], None]], list[str]]
 
 
 def _now() -> str:
@@ -99,6 +102,7 @@ def _job(row: sqlite3.Row, payload: bytes | None = None) -> QueuedJob:
         error=row["error"],
         created_at=row["created_at"],
         finished_at=row["finished_at"],
+        progress=tuple(json.loads(row["progress"])) if row["progress"] else None,
         payload=payload,
     )
 
@@ -117,6 +121,9 @@ class IngestQueue:
         conn.row_factory = sqlite3.Row
         if not self._ready:
             conn.execute(_SCHEMA)
+            # 早先建的表没有 progress 这一列
+            if "progress" not in {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}:
+                conn.execute("ALTER TABLE jobs ADD COLUMN progress TEXT")
             conn.commit()
             self._ready = True
         return conn
@@ -231,7 +238,8 @@ class IngestQueue:
                 raise JobNotRetryable(job_id)
             conn.execute(
                 "UPDATE jobs SET status = 'pending', stage = ?, note_ids = '[]', duplicate = 0,"
-                " force = 1, error = NULL, queued_at = ?, finished_at = NULL WHERE id = ?",
+                " force = 1, error = NULL, progress = NULL, queued_at = ?, finished_at = NULL"
+                " WHERE id = ?",
                 (FIRST_STAGE, _now(), job_id),
             )
         self._ensure_worker()
@@ -261,7 +269,8 @@ class IngestQueue:
         """
         with closing(self._connect()) as conn, conn:
             conn.execute(
-                "UPDATE jobs SET status = 'pending', stage = ? WHERE status = 'running'",
+                "UPDATE jobs SET status = 'pending', stage = ?, progress = NULL"
+                " WHERE status = 'running'",
                 (FIRST_STAGE,),
             )
             pending = conn.execute(
@@ -316,11 +325,20 @@ class IngestQueue:
 
     def _process(self, job: QueuedJob) -> None:
         try:
-            ids = self._handler(job, lambda stage: self._update(job.id, stage=stage))
+            ids = self._handler(
+                job,
+                # 换阶段时进度清零：进度只属于「拆分」里的分段整理
+                lambda stage: self._update(job.id, stage=stage, progress=None),
+                lambda done, total: self._update(job.id, progress=json.dumps([done, total])),
+            )
         except Exception as exc:
             logger.exception("录入失败 job=%s", job.id)
             self._update(
-                job.id, status="failed", error=str(exc) or type(exc).__name__, finished_at=_now()
+                job.id,
+                status="failed",
+                error=str(exc) or type(exc).__name__,
+                progress=None,
+                finished_at=_now(),
             )
             return
         # 成功后输入就不用留了
@@ -330,6 +348,7 @@ class IngestQueue:
             stage="写入",
             note_ids=json.dumps(ids),
             payload=None,
+            progress=None,
             finished_at=_now(),
         )
         self._prune()

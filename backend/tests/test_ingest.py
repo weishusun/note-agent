@@ -13,12 +13,14 @@ from app.extract import classifier
 from app.extract.classifier import Placement
 from app.extract.extractor import ExtractError
 from app.extract.models import Extraction, NoteDraft, TopicDraft
+from app.ingest import sources
 from app.ingest import pipeline
 from app.ingest.pipeline import input_hash
 from app.ingest.queue import IngestQueue
 from app.main import create_app
 from app.vault import git
 from app.vault.store import VaultStore
+from tests.conftest import make_pdf
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake-image-bytes"
 
@@ -57,6 +59,9 @@ class Stubs:
     def __init__(self) -> None:
         self.extraction = Extraction(topic=TOPIC, concepts=CONCEPTS)
         self.extract_calls: list[tuple[bytes | None, str | None]] = []
+        # 长资料走 digest：记下 (正文, 文件名提示)
+        self.digest_calls: list[tuple[str, str | None]] = []
+        self.digest_chunks = 1
         self.classify_calls: list = []
         self.commits: list[str] = []
         self.extract_error: Exception | None = None
@@ -68,6 +73,14 @@ class Stubs:
         if self.extract_error is not None:
             raise self.extract_error
         return self.extraction, {}
+
+    def digest(self, text, *, title_hint=None, on_progress=lambda done, total: None):
+        self.digest_calls.append((text, title_hint))
+        if self.extract_error is not None:
+            raise self.extract_error
+        for done in range(self.digest_chunks + 1):
+            on_progress(done, self.digest_chunks)
+        return self.extraction, {"chars": len(text), "truncated": False, "chunks": self.digest_chunks}
 
     def classify_notes(self, briefs, tree):
         self.classify_calls.append((briefs, tree))
@@ -86,6 +99,7 @@ class Stubs:
 def stubs(monkeypatch: pytest.MonkeyPatch) -> Stubs:
     s = Stubs()
     monkeypatch.setattr(pipeline, "extract_drafts", s.extract)
+    monkeypatch.setattr(pipeline, "digest_document", s.digest)
     monkeypatch.setattr(classifier, "classify_notes", s.classify_notes)
     monkeypatch.setattr(git, "commit", s.commit)
     return s
@@ -320,10 +334,13 @@ def test_classification_failure_does_not_fail_ingest(
     "body, detail",
     [
         (dict(kind="text", text="   "), "非空 text"),
-        (dict(kind="text", text="长" * 2000), "短文本"),
+        (dict(kind="text", text="长" * 1_000_001), "文本太长"),
         (dict(kind="screenshot"), "image_b64"),
         (dict(kind="screenshot", image_b64="不是 base64!"), "base64"),
-        (dict(kind="file", file_b64="aGk=", filename="讲义.pdf"), "暂不支持"),
+        (dict(kind="file", file_b64="aGk=", filename="表格.xlsx"), "暂不支持这种文件"),
+        (dict(kind="file", file_b64="aGk="), "filename"),
+        (dict(kind="file", filename="讲义.pdf"), "file_b64"),
+        (dict(kind="file", file_b64="不是 base64!", filename="讲义.pdf"), "base64"),
         (dict(kind="generated", text="记录量子力学"), "暂不支持"),
     ],
 )
@@ -534,7 +551,7 @@ def test_clearing_finished_jobs_keeps_failed_ones(client: TestClient, stubs: Stu
 
 def test_unfinished_jobs_are_picked_up_when_the_app_restarts(vault_root: Path, stubs: Stubs) -> None:
     # 上一次运行留下的队列：一份处理到一半（running），一份还没轮到（pending）
-    left = IngestQueue(vault_root / ".noteagent" / "queue.db", lambda job, on_stage: [])
+    left = IngestQueue(vault_root / ".noteagent" / "queue.db", lambda job, on_stage, on_progress: [])
     ids = [
         left._insert("text", label, None, label.encode("utf-8"), input_hash("text", label.encode("utf-8")),
                      status, [], False, False)
@@ -548,3 +565,106 @@ def test_unfinished_jobs_are_picked_up_when_the_app_restarts(vault_root: Path, s
     assert [(j["status"], j["label"]) for j in jobs] == [("done", "处理到一半的"), ("done", "还没轮到的")]
     assert [text for _, text in stubs.extract_calls] == ["处理到一半的", "还没轮到的"]
     assert [r["title"] for r in jobs[0]["created"]] == ["RAG 与微调的对比", "RAG"]
+
+
+# ---------- 长文本和文件（SCHEMA 2.4） ----------
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def test_pdf_ingest_reads_the_text_keeps_the_file_and_digests_it(
+    client: TestClient, vault_root: Path, stubs: Stubs
+) -> None:
+    pdf = make_pdf(["Retrieval-Augmented Generation", "versus fine-tuning"])
+    job = _ingest(client, kind="file", file_b64=_b64(pdf), filename="C:\\资料\\RAG 对比.pdf")
+
+    assert (job["status"], job["kind"], job["label"]) == ("done", "file", "RAG 对比.pdf")
+    # 走的是摘要级整理，不是截图那一路；交给模型的是读出来的文字，文件名（不带扩展名）作提示
+    assert stubs.extract_calls == []
+    [(text, hint)] = stubs.digest_calls
+    assert "Retrieval-Augmented Generation" in text and hint == "RAG 对比"
+    # 原文件存进 assets/，用原来的名字；只有主题笔记带着它
+    assert (vault_root / "assets" / "RAG 对比.pdf").read_bytes() == pdf
+    topic, rag = _read(vault_root, "RAG 与微调的对比.md"), _read(vault_root, "RAG.md")
+    assert topic.rstrip().endswith("## 原始输入\n![[assets/RAG 对比.pdf]]")
+    assert "kind: file" in topic and "ref: assets/RAG 对比.pdf" in rag and "![[" not in rag
+    assert stubs.commits == ["note: 新建 3 条 (来源 file)"]
+    assert client.get("/api/assets/RAG 对比.pdf").content == pdf
+
+
+def test_markdown_file_with_data_url_prefix(client: TestClient, vault_root: Path, stubs: Stubs) -> None:
+    body = "# 笔记\n\n" + "正文很长。" * 20
+    job = _ingest(
+        client,
+        kind="file",
+        file_b64="data:text/markdown;base64," + _b64(body.encode("utf-8")),
+        filename="笔记.md",
+    )
+    assert job["status"] == "done"
+    assert stubs.digest_calls == [(body, "笔记")]
+    assert (vault_root / "assets" / "笔记.md").read_text(encoding="utf-8") == body
+
+
+def test_long_text_is_digested_and_the_full_text_saved_as_an_asset(
+    client: TestClient, vault_root: Path, stubs: Stubs
+) -> None:
+    text = "开头一句话。\n" + "长" * 2500
+    job = _ingest(client, kind="text", text=f"  {text}\n")
+
+    assert job["status"] == "done" and job["label"] == "开头一句话。 " + "长" * 33 + "…"
+    assert stubs.extract_calls == [] and stubs.digest_calls == [(text, None)]
+    [asset] = (vault_root / "assets").glob("*.txt")
+    assert asset.read_text(encoding="utf-8") == text
+    original = _read(vault_root, "RAG 与微调的对比.md").split("## 原始输入\n")[1]
+    assert original.startswith("> 开头一句话。\n> 长长长")
+    assert original.rstrip().endswith(f"……\n\n全文：![[assets/{asset.name}]]")
+    assert len(original) < 300  # 正文里只引开头，不把几千字全贴进去
+
+
+def test_text_just_under_the_threshold_keeps_its_structure(client: TestClient, stubs: Stubs) -> None:
+    _ingest(client, kind="text", text="短" * 1999)
+    assert stubs.digest_calls == [] and len(stubs.extract_calls) == 1
+
+
+def test_unreadable_file_fails_the_job_with_a_plain_message_and_leaves_nothing(
+    client: TestClient, vault_root: Path, stubs: Stubs
+) -> None:
+    job = _ingest(client, kind="file", file_b64=_b64(make_pdf([])), filename="扫描件.pdf")
+    assert job["status"] == "failed" and "扫描件" in job["error"]
+    assert stubs.digest_calls == []
+    assert list((vault_root / "assets").iterdir()) == [] and list((vault_root / "notes").iterdir()) == []
+
+
+def test_oversized_file_is_rejected_up_front(
+    client: TestClient, stubs: Stubs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import main
+
+    monkeypatch.setattr(main, "MAX_FILE_BYTES", 10)
+    resp = client.post("/api/ingest", json=dict(kind="file", file_b64=_b64(b"x" * 11), filename="大.txt"))
+    assert resp.status_code == 400 and "文件太大" in resp.json()["detail"]
+    assert sources.MAX_FILE_BYTES == 30 * 1024 * 1024
+
+
+def test_chunk_progress_is_reported_while_digesting(
+    client: TestClient, stubs: Stubs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict | None] = []
+    stubs.digest_chunks = 3
+    digest = stubs.digest
+
+    def watching(text, *, title_hint=None, on_progress=lambda done, total: None):
+        def report(done: int, total: int) -> None:
+            on_progress(done, total)
+            job = client.get("/api/jobs").json()[0]
+            seen.append((job["stage"], job["progress"]))
+
+        return digest(text, title_hint=title_hint, on_progress=report)
+
+    monkeypatch.setattr(pipeline, "digest_document", watching)
+    job = _ingest(client, kind="text", text="长" * 3000)
+
+    assert seen == [("拆分", {"done": n, "total": 3}) for n in range(4)]
+    assert (job["status"], job["progress"]) == ("done", None)  # 换阶段后进度清掉

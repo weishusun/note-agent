@@ -146,9 +146,12 @@ def extract_drafts(
     return extraction, usage
 
 
-def _fit(batch: _DraftBatch) -> Extraction:
+def _fit(batch: _DraftBatch, keep_topic: bool = False) -> Extraction:
     """把模型原样返回的内容收进草稿的上限里:超长的短文本先交给文本模型压缩,压不下来再截断
-    (以「…」结尾,原文仍在笔记的「原始输入」里)。只删减,不新增内容。"""
+    (以「…」结尾,原文仍在笔记的「原始输入」里)。只删减,不新增内容。
+
+    keep_topic:长资料的主题笔记装着摘要和大纲,即使和唯一的概念笔记同名也要留着。
+    """
     wires = batch.concepts
     if len(wires) > CONCEPTS_MAX:
         logger.warning("模型返回 %d 条概念笔记,只保留前 %d 条", len(wires), CONCEPTS_MAX)
@@ -166,7 +169,7 @@ def _fit(batch: _DraftBatch) -> Extraction:
             logger.warning("draft %r 有 %d 条要点,只保留前 %d 条", title, len(points), POINTS_MAX)
         # 一条要点都没有时用概要顶上:NoteDraft 至少要一条
         concepts.append(
-            (title, summary, points[:POINTS_MAX] or [summary], _dedupe(wire.supplement)[:SUPPLEMENT_MAX], wire)
+            (title, summary, points[:POINTS_MAX] or [summary], _real_supplement(wire.supplement), wire)
         )
 
     topic = batch.topic
@@ -176,7 +179,11 @@ def _fit(batch: _DraftBatch) -> Extraction:
         if not topic.content.strip():
             logger.warning("主题笔记 %r 没有内容,丢弃", topic.title)
             topic = None
-        elif len(concepts) == 1 and concepts[0][0].casefold() == topic.title.strip().casefold():
+        elif (
+            not keep_topic
+            and len(concepts) == 1
+            and concepts[0][0].casefold() == topic.title.strip().casefold()
+        ):
             # 整份输入只讲这一个概念:按 SCHEMA 2.3 只留概念笔记
             logger.warning("主题笔记与唯一的概念笔记同名(%r),只保留概念笔记", topic.title)
             topic = None
@@ -252,6 +259,14 @@ def _clip_content(content: str) -> str:
         return content
     logger.warning("主题笔记的内容有 %d 字,截断到 %d 字", len(content), TOPIC_CONTENT_MAX)
     return content[: TOPIC_CONTENT_MAX - len(_TRUNCATED_NOTE)] + _TRUNCATED_NOTE
+
+
+# 模型没有可补充的内容时，偶尔会把提示词里的话或一句「无」填进来，而不是留空
+_NOT_A_SUPPLEMENT = re.compile(r"不是来自|来自用户的资料|来自你的资料|^(暂?无|没有)(补充)?[。.]?$")
+
+
+def _real_supplement(items: list[str]) -> list[str]:
+    return [s for s in _dedupe(items) if not _NOT_A_SUPPLEMENT.search(s)][:SUPPLEMENT_MAX]
 
 
 def _dedupe(values: list[str]) -> list[str]:

@@ -21,6 +21,8 @@ _TIMEOUT_SECONDS = 120.0
 # 检索词扩展只是锦上添花,慢了就放弃,不能拖住整次问答
 _EXPAND_TIMEOUT_SECONDS = 10.0
 _PROBE_TIMEOUT_SECONDS = 60.0
+# 整理长资料:一次调用要读一两万字、写出上千字
+_DIGEST_TIMEOUT_SECONDS = 240.0
 
 _NO_THINKING = {"thinking": {"type": "disabled"}}
 
@@ -73,6 +75,15 @@ def get_classify_model(override: str | None = None):
     current = settings.load()
     name = _resolve_model(override, current.classify_model, "分类模型")
     return _build(name, current, no_thinking=current.disable_thinking)
+
+
+def get_digest_model(override: str | None = None):
+    """整理长资料用的文本模型(同分类模型)。输入长、输出也长,超时放宽。"""
+    current = settings.load()
+    name = _resolve_model(override, current.classify_model, "分类模型")
+    return _build(
+        name, current, timeout=_DIGEST_TIMEOUT_SECONDS, no_thinking=current.disable_thinking
+    )
 
 
 def get_expand_model(override: str | None = None):

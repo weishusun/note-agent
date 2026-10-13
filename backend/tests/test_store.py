@@ -226,3 +226,12 @@ def test_rewrite_note_replaces_body_in_place(store: VaultStore) -> None:
     assert after.path == rel and after.frontmatter.id == before.frontmatter.id
     read = store.read_note(rel)
     assert (read.body.strip(), read.frontmatter.summary) == ("## 要点\n- 改过的正文", "改过的概要。")
+
+
+def test_save_asset_can_keep_the_original_filename(store: VaultStore) -> None:
+    first = store.save_asset(b"%PDF-1", "pdf", name="讲义: 第 1 章?")
+    second = store.save_asset(b"%PDF-2", ".PDF", name="讲义: 第 1 章?")
+    assert (first, second) == ("assets/讲义 第 1 章.pdf", "assets/讲义 第 1 章 (2).pdf")
+    assert store.read_asset("讲义 第 1 章 (2).pdf") == b"%PDF-2"
+    # 不给名字：按时间起名
+    assert store.save_asset(b"x", "txt").startswith("assets/20")

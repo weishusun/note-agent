@@ -10,6 +10,7 @@ from app.vault.store import sanitize_filename
 
 _EMPTY_RELATED = "（暂无）"
 _TEXT_REF_CHARS = 100
+_LONG_TEXT_EXCERPT_CHARS = 200
 # 「模型补充」区块固定的第一行（SCHEMA 不变量 14）：模型自己的知识不能和使用者的资料长得一样
 SUPPLEMENT_HEADING = "## 模型补充"
 SUPPLEMENT_MARKER = "> 以下内容由模型根据自身知识补充，不是来自你的资料。"
@@ -113,12 +114,22 @@ def _source(kind: SourceKind, asset_path: str | None, text: str | None) -> tuple
         if not asset_path:
             raise ValueError("kind=screenshot 需要 asset_path")
         return SourceRef(kind=kind, ref=asset_path), f"![[{asset_path}]]"
+    if kind == "file":
+        if not asset_path:
+            raise ValueError("kind=file 需要 asset_path")
+        return SourceRef(kind=kind, ref=asset_path), f"![[{asset_path}]]"
     if kind == "text":
         stripped = (text or "").strip()
         if not stripped:
             raise ValueError("kind=text 需要非空 text")
+        source = SourceRef(kind=kind, ref=stripped[:_TEXT_REF_CHARS])
+        if asset_path:
+            # 长文本：全文存成了素材文件，正文里只引开头一小段
+            excerpt = stripped[:_LONG_TEXT_EXCERPT_CHARS]
+            quoted = "\n".join(f"> {line}".rstrip() for line in excerpt.splitlines())
+            return source, f"{quoted}……\n\n全文：![[{asset_path}]]"
         quoted = "\n".join(f"> {line}".rstrip() for line in stripped.splitlines())
-        return SourceRef(kind=kind, ref=stripped[:_TEXT_REF_CHARS]), quoted
+        return source, quoted
     raise ValueError(f"暂不支持的来源: {kind}")
 
 

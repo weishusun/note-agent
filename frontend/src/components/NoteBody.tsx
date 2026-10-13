@@ -1,7 +1,7 @@
 import type { ReactNode } from "react"
 
 // 笔记正文的轻量渲染：覆盖录入时会生成的写法（SCHEMA 2.3）——
-// 标题、有序/无序/嵌套列表、表格、引用块、![[截图]]、[[双链]]、**加粗**、`代码`。其余按普通段落显示。
+// 标题、有序/无序/嵌套列表、表格、引用块、![[截图]]、![[原文件]]、[[双链]]、**加粗**、`代码`。其余按普通段落显示。
 
 interface ListItem {
   // 缩进层级：每两个空格算一层
@@ -19,11 +19,13 @@ type Block =
   | { kind: "image"; name: string }
   | { kind: "paragraph"; lines: string[] }
 
-const IMAGE = /^!\[\[assets\/([^\]|]+)\]\]$/
+// 单独成行、且是图片的素材才显示成图；别的素材（PDF、文本）显示成能点开的链接
+const IMAGE = /^!\[\[assets\/([^\]|]+\.(?:png|jpe?g|gif|webp))\]\]$/i
+const ASSET = /^!\[\[assets\/([^\]|]+)\]\]$/
 const HEADING = /^(#{1,6})\s+(.*)$/
 const LIST_ITEM = /^(\s*)([-*]|\d+[.)])\s+(.*)$/
 const TABLE_DIVIDER = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/
-const INLINE = /(\[\[[^\]]+\]\]|\*\*[^*]+\*\*|`[^`]+`)/
+const INLINE = /(!?\[\[[^\]]+\]\]|\*\*[^*]+\*\*|`[^`]+`)/
 
 function cells(line: string): string[] {
   return line
@@ -96,6 +98,20 @@ export function NoteBody({
 }) {
   const inline = (text: string): ReactNode[] =>
     text.split(INLINE).map((part, i) => {
+      const asset = ASSET.exec(part)
+      if (asset) {
+        return (
+          <a
+            key={i}
+            href={`/api/assets/${encodeURIComponent(asset[1])}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-primary underline decoration-muted-foreground/50 underline-offset-4 hover:decoration-primary"
+          >
+            {asset[1]}
+          </a>
+        )
+      }
       if (part.startsWith("[[") && part.endsWith("]]")) {
         const [target, label] = part.slice(2, -2).split("|")
         if (!onOpenLink) {

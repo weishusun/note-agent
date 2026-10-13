@@ -181,7 +181,7 @@ def test_default_timestamp_has_timezone() -> None:
     [
         (dict(kind="screenshot"), "asset_path"),
         (dict(kind="text", text="   "), "非空 text"),
-        (dict(kind="file", asset_path="assets/a.pdf"), "暂不支持"),
+        (dict(kind="file"), "asset_path"),
         (dict(kind="generated", text="记录量子力学"), "暂不支持"),
     ],
 )
@@ -201,3 +201,20 @@ def test_assembled_notes_round_trip_through_store(store: VaultStore) -> None:
         assert read.frontmatter == note.frontmatter and read.frontmatter.id is not None
         assert read.body.strip() == note.body.strip()
     assert "type: topic" in (store.root / topic_rel).read_text(encoding="utf-8")
+
+
+# ---------- 长资料的来源写法 ----------
+
+
+def test_file_source_links_the_saved_original() -> None:
+    note = _topic_note(kind="file", asset_path="assets/讲义.pdf")
+    assert (note.frontmatter.source.kind, note.frontmatter.source.ref) == ("file", "assets/讲义.pdf")
+    assert note.body.endswith("## 原始输入\n![[assets/讲义.pdf]]\n")
+
+
+def test_long_text_source_quotes_only_the_opening_and_links_the_full_text() -> None:
+    text = "第一行\n" + "长" * 5000
+    note = _topic_note(kind="text", text=text, asset_path="assets/2026-10-13-190000.txt")
+    assert note.frontmatter.source.ref == text[:100]
+    original = note.body.split("## 原始输入\n")[1]
+    assert original == "> 第一行\n> " + "长" * 196 + "……\n\n全文：![[assets/2026-10-13-190000.txt]]\n"

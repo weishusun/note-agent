@@ -206,7 +206,17 @@ function StatusText({
   suspected: number
 }) {
   if (job.status === "pending") return <>排队中</>
-  if (job.status === "running") return <>处理中</>
+  if (job.status === "running") {
+    // 长资料是分段整理的：显示整理到第几段了
+    return (
+      <>
+        处理中
+        {job.progress && job.progress.total > 1
+          ? ` · 已读完 ${job.progress.done}/${job.progress.total} 段`
+          : ""}
+      </>
+    )
+  }
   if (job.status === "failed") return <>失败</>
   if (count === 0) return <>笔记已经不在了</>
   if (job.duplicate) return <>之前录入过，这是当时的 {count} 条笔记</>

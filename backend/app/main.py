@@ -4,8 +4,9 @@ import logging
 import mimetypes
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -14,9 +15,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.ask.answer import AskResult, answer_question
 from app.config import default_vault_root
-from app.ingest.jobs import JobRegistry, JobState
-from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
+from app.ingest.jobs import JobRegistry, JobState, Progress
+from app.ingest.pipeline import input_hash, run_ingest
 from app.ingest.queue import IngestQueue, JobNotRetryable, JobRunning, QueuedJob
+from app.ingest.sources import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS, file_extension
 from app.organize.api import build_router as build_organize_router
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
@@ -50,42 +52,64 @@ class AskRequest(BaseModel):
         return v.strip()
 
 
-def _parse_ingest(req: IngestRequest) -> tuple[str | None, bytes | None]:
-    """校验请求并取出 (text, image)，恰有一个非空。不合法抛 400。"""
+# 文本再长也只整理前 20 万字（digest.DOC_MAX_CHARS），这里只挡住明显不对劲的输入
+TEXT_MAX_CHARS = 1_000_000
+_LABEL_CHARS = 40
+
+
+@dataclass(frozen=True)
+class _Input:
+    """一份校验过的输入，原样存进队列。"""
+
+    kind: SourceKind
+    payload: bytes
+    # 队列列表里显示的名字
+    label: str
+    filename: str | None = None
+
+
+def _decode_b64(value: str, field: str) -> bytes:
+    # 允许前端直接传 data URL
+    encoded = value.split(",", 1)[1] if value.startswith("data:") else value
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field} 不是合法的 base64")
+    if not data:
+        raise HTTPException(status_code=400, detail=f"{field} 解码后为空")
+    return data
+
+
+def _parse_ingest(req: IngestRequest) -> _Input:
+    """校验请求。不合法抛 400。"""
     if req.kind == "text":
         text = (req.text or "").strip()
         if not text:
             raise HTTPException(status_code=400, detail="kind=text 需要非空 text")
-        if len(text) >= SHORT_TEXT_MAX_CHARS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"暂只支持 {SHORT_TEXT_MAX_CHARS} 字以内的短文本",
-            )
-        return text, None
+        if len(text) > TEXT_MAX_CHARS:
+            raise HTTPException(status_code=400, detail=f"文本太长了，最多 {TEXT_MAX_CHARS} 字")
+        flat = " ".join(text[: _LABEL_CHARS * 4].split())
+        label = flat if len(flat) <= _LABEL_CHARS else flat[:_LABEL_CHARS] + "…"
+        return _Input("text", text.encode("utf-8"), label)
     if req.kind == "screenshot":
         if not req.image_b64:
             raise HTTPException(status_code=400, detail="kind=screenshot 需要 image_b64")
-        # 允许前端直接传 data URL
-        encoded = req.image_b64.split(",", 1)[1] if req.image_b64.startswith("data:") else req.image_b64
-        try:
-            image = base64.b64decode(encoded, validate=True)
-        except (binascii.Error, ValueError):
-            raise HTTPException(status_code=400, detail="image_b64 不是合法的 base64")
-        if not image:
-            raise HTTPException(status_code=400, detail="image_b64 解码后为空")
-        return None, image
+        return _Input("screenshot", _decode_b64(req.image_b64, "image_b64"), "截图")
+    if req.kind == "file":
+        filename = PurePath((req.filename or "").replace("\\", "/")).name.strip()
+        if not req.file_b64 or not filename:
+            raise HTTPException(status_code=400, detail="kind=file 需要 file_b64 和 filename")
+        if file_extension(filename) not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400, detail="暂不支持这种文件，目前支持 PDF、Markdown 和纯文本"
+            )
+        data = _decode_b64(req.file_b64, "file_b64")
+        if len(data) > MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=400, detail=f"文件太大了，最大 {MAX_FILE_BYTES // 1024 // 1024} MB"
+            )
+        return _Input("file", data, filename, filename)
     raise HTTPException(status_code=400, detail=f"暂不支持的来源: {req.kind}")
-
-
-_LABEL_CHARS = 40
-
-
-def _label(kind: str, text: str | None) -> str:
-    """队列列表里显示的名字。"""
-    if kind == "screenshot":
-        return "截图"
-    flat = " ".join((text or "").split())
-    return flat if len(flat) <= _LABEL_CHARS else flat[:_LABEL_CHARS] + "…"
 
 
 def _split_refs(refs: list[NoteRef]) -> dict[str, list[NoteRef]]:
@@ -103,7 +127,9 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
     organizer = Organizer(store, taxonomy, index)
     jobs = JobRegistry()
 
-    def handle(job: QueuedJob, on_stage: Callable[[str], None]) -> list[str]:
+    def handle(
+        job: QueuedJob, on_stage: Callable[[str], None], on_progress: Callable[[int, int], None]
+    ) -> list[str]:
         """队列线程里执行：把一份排队的输入变成笔记。"""
         payload = job.payload or b""
         ids = run_ingest(
@@ -113,7 +139,10 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             kind=job.kind,  # type: ignore[arg-type]
             text=payload.decode("utf-8") if job.kind == "text" else None,
             image=payload if job.kind == "screenshot" else None,
+            file=payload if job.kind == "file" else None,
+            filename=job.filename,
             on_stage=on_stage,
+            on_progress=on_progress,
         )
         index.put_ingest_log(job.input_hash, ids, datetime.now().astimezone().isoformat())
         return ids
@@ -164,15 +193,21 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             stage=job.stage,
             duplicate=job.duplicate,
             error=job.error,
+            progress=Progress(done=job.progress[0], total=job.progress[1]) if job.progress else None,
             **_split_refs(refs_by_ids(index, job.note_ids)),
         )
 
     @app.post("/api/ingest", status_code=202)
     def api_ingest(req: IngestRequest) -> dict[str, str]:
-        text, image = _parse_ingest(req)
-        payload = image if image is not None else (text or "").encode("utf-8")
-        digest = input_hash(req.kind, payload)
-        entry = dict(kind=req.kind, label=_label(req.kind, text), payload=payload, input_hash=digest)
+        parsed = _parse_ingest(req)
+        digest = input_hash(parsed.kind, parsed.payload)
+        entry = dict(
+            kind=parsed.kind,
+            label=parsed.label,
+            payload=parsed.payload,
+            input_hash=digest,
+            filename=parsed.filename,
+        )
 
         if not req.force:
             # 同一份输入还在队列里：不重复排队
@@ -272,7 +307,11 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="素材不存在")
         except ValueError:
             raise HTTPException(status_code=400, detail="非法的素材名")
-        media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if PurePath(name).suffix.lower() in (".md", ".markdown", ".txt"):
+            # 让浏览器直接显示，而不是当成未知类型去下载
+            media_type = "text/plain"
+        else:
+            media_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
         return Response(content=data, media_type=media_type)
 
     @app.get("/api/inbox")

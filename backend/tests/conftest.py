@@ -13,6 +13,34 @@ from app.vault.taxonomy import TaxonomyManager
 
 TZ = timezone(timedelta(hours=8))
 
+
+def make_pdf(lines: list[str], pages: int = 1) -> bytes:
+    """手写一个最小的 PDF：每页都印上 lines 这几行（只支持 ASCII）。lines 为空就是没有文字层的「扫描件」。"""
+    text = " ".join(f"({line}) Tj 0 -16 Td" for line in lines)
+    content = f"BT /F1 12 Tf 72 720 Td {text} ET" if lines else ""
+    kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(pages))
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    for i in range(pages):
+        objects.append(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Contents {5 + 2 * i} 0 R /Resources << /Font << /F1 3 0 R >> >> >>"
+        )
+        objects.append(f"<< /Length {len(content)} >>\nstream\n{content}\nendstream")
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n{body}\nendobj\n".encode("latin-1")
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("latin-1")
+    out += "".join(f"{offset:010d} 00000 n \n" for offset in offsets).encode("latin-1")
+    out += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("latin-1")
+    return out
+
 TAXONOMY_YAML = """
 version: 2
 updated: 2026-07-30
