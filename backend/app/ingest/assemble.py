@@ -50,9 +50,10 @@ def assemble_concept(
     text: str | None = None,
     topic_stem: str | None = None,
     link_targets: Collection[str] = (),
+    duplicate_of: str | None = None,
     now: datetime | None = None,
 ) -> Note:
-    """概念笔记：要点、模型补充、关联。
+    """概念笔记：要点、模型补充、关联。duplicate_of 是疑似与之重复的已有笔记的 id（SCHEMA 2.5）。
 
     topic_stem 是它出自的主题笔记的文件名；有主题笔记时原始输入只放在主题笔记里，
     没有时（输入只讲一个概念）放在这条的末尾。link_targets 是「真实存在或本批即将创建」
@@ -65,9 +66,11 @@ def assemble_concept(
     sections.append("## 关联\n" + _related_block(draft, topic_stem, link_targets))
     if topic_stem is None:
         sections.append(f"## 原始输入\n{original}")
-    return _note(
+    note = _note(
         "concept", draft.title, draft.summary, draft.aliases, sections, category, confidence, source, now
     )
+    note.frontmatter = note.frontmatter.model_copy(update={"duplicate_of": duplicate_of})
+    return note
 
 
 def _note(

@@ -91,12 +91,20 @@ export function NoteBody({
   onOpenLink,
 }: {
   body: string
-  onOpenLink: (target: string) => void
+  // 不给时双链只显示成文字、点不动（并排对比两条笔记时用）
+  onOpenLink?: (target: string) => void
 }) {
   const inline = (text: string): ReactNode[] =>
     text.split(INLINE).map((part, i) => {
       if (part.startsWith("[[") && part.endsWith("]]")) {
         const [target, label] = part.slice(2, -2).split("|")
+        if (!onOpenLink) {
+          return (
+            <span key={i} className="underline decoration-muted-foreground/50 underline-offset-4">
+              {(label ?? target).trim()}
+            </span>
+          )
+        }
         return (
           <button
             key={i}

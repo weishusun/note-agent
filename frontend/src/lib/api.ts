@@ -48,6 +48,7 @@ export interface NoteDetail {
     category_locked: boolean
     aliases: string[]
     status: NoteRef["status"]
+    duplicate_of: string | null
     updated: string
     source: { kind: string; ref: string }
   }
@@ -175,7 +176,7 @@ export const api = {
   job: (jobId: string) => request<JobState>(`/api/jobs/${encodeURIComponent(jobId)}`),
   ask: (question: string) => post<AskResult>("/api/ask", { question }),
 
-  notes: (filter: { category?: string; status?: "inbox" } = {}) =>
+  notes: (filter: { category?: string; status?: "inbox"; duplicates?: "true" } = {}) =>
     request<NoteRef[]>(`/api/notes?${query({ ...filter, limit: 200 })}`),
   search: (q: string) =>
     request<{ results: NoteRef[] }>(
@@ -190,8 +191,16 @@ export const api = {
     post<NoteRef>("/api/notes", note),
   editNote: (id: string, changes: NoteEdit) =>
     send<NoteRef>("PUT", `/api/notes/${encodeURIComponent(id)}`, changes),
-  deleteNote: (id: string) =>
-    request<{ deleted: boolean }>(`/api/notes/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  // replacedBy：疑似重复里「只留一条」——留下的是 replacedBy，指向被删这条的链接改指它
+  deleteNote: (id: string, replacedBy?: string) =>
+    request<{ deleted: boolean }>(
+      `/api/notes/${encodeURIComponent(id)}?${query({ replaced_by: replacedBy })}`,
+      { method: "DELETE" },
+    ),
+  // 疑似重复的另外两种处理：把 id 这条并进 into 那条；两条都留（清掉标记）
+  mergeNote: (id: string, into: string) =>
+    post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/merge`, { into }),
+  keepNote: (id: string) => post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/keep`, {}),
   ref: (id: string) => request<NoteRef>(`/api/refs/${encodeURIComponent(id)}`),
 
   // 分类：路径里有中文和「/」，一律放在请求体或查询参数里

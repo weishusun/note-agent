@@ -20,7 +20,11 @@ const SEARCH_DEBOUNCE_MS = 250
 const JOB_POLL_MS = 600
 const NAME_MAX = 12
 
-type Selection = { kind: "all" } | { kind: "inbox" } | { kind: "category"; path: string }
+type Selection =
+  | { kind: "all" }
+  | { kind: "inbox" }
+  | { kind: "duplicates" }
+  | { kind: "category"; path: string }
 type Edit = { mode: "rename" | "create"; value: string }
 
 const INPUT =
@@ -30,11 +34,14 @@ export function NotesPanel({
   active,
   version,
   onOpenNote,
+  onCompare,
 }: {
   active: boolean
   // 别处改了笔记的分类（比如在笔记弹窗里）时递增，让这里重新加载
   version: number
   onOpenNote: (note: NoteRef) => void
+  // 并排对比这些疑似重复的笔记，一条一条来
+  onCompare: (ids: string[]) => void
 }) {
   const [tree, setTree] = useState<Tree | null>(null)
   const [selection, setSelection] = useState<Selection>({ kind: "all" })
@@ -67,9 +74,11 @@ export function NotesPanel({
     }
   }, [active, reloadKey])
 
-  // 待整理清空后那个入口会从目录里消失：别让右边停在一个已经选不到的视图上
+  // 待整理、疑似重复清空后那个入口会从目录里消失：别让右边停在一个已经选不到的视图上
   useEffect(() => {
-    if (tree && tree.inbox === 0 && selection.kind === "inbox") setSelection({ kind: "all" })
+    if (!tree) return
+    if (tree.inbox === 0 && selection.kind === "inbox") setSelection({ kind: "all" })
+    if (tree.duplicates === 0 && selection.kind === "duplicates") setSelection({ kind: "all" })
   }, [tree, selection.kind])
 
   const searching = query.trim().length > 0
@@ -85,9 +94,11 @@ export function NotesPanel({
         : api.notes(
             selection.kind === "inbox"
               ? { status: "inbox" }
-              : selection.kind === "category"
-                ? { category: selection.path }
-                : {},
+              : selection.kind === "duplicates"
+                ? { duplicates: "true" }
+                : selection.kind === "category"
+                  ? { category: selection.path }
+                  : {},
           )
       request.then(
         (result) => {
@@ -181,6 +192,14 @@ export function NotesPanel({
             count={tree.inbox}
             selected={!searching && selection.kind === "inbox"}
             onSelect={() => setSelection({ kind: "inbox" })}
+          />
+        )}
+        {!!tree?.duplicates && (
+          <TreeRow
+            label="疑似重复"
+            count={tree.duplicates}
+            selected={!searching && selection.kind === "duplicates"}
+            onSelect={() => setSelection({ kind: "duplicates" })}
           />
         )}
         {tree?.categories.map((parent) => {
@@ -357,6 +376,7 @@ export function NotesPanel({
               <h2 className="flex items-center gap-1.5 text-sm font-semibold">
                 {selection.kind === "all" && "全部笔记"}
                 {selection.kind === "inbox" && "待整理"}
+                {selection.kind === "duplicates" && "疑似重复"}
                 {selectedPath && categoryLabel(selectedPath)}
                 {selected?.locked && (
                   <LockIcon
@@ -396,6 +416,16 @@ export function NotesPanel({
                   </Button>
                 </>
               )}
+              {selection.kind === "duplicates" && !!notes?.length && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={disabled}
+                  onClick={() => onCompare(notes.flatMap((n) => (n.id ? [n.id] : [])))}
+                >
+                  逐条对比
+                </Button>
+              )}
               {selection.kind === "inbox" && (
                 <Button
                   size="sm"
@@ -420,6 +450,12 @@ export function NotesPanel({
           </p>
         )}
 
+        {!searching && selection.kind === "duplicates" && (
+          <p className="-mt-2 text-xs text-muted-foreground">
+            这些笔记和知识库里更早的某条同名。点开一条，并排看两边的内容，再决定留哪条、都留还是合并。
+          </p>
+        )}
+
         {notes?.length === 0 && (
           <p className="text-sm text-muted-foreground">
             {searching
@@ -430,7 +466,16 @@ export function NotesPanel({
           </p>
         )}
         {notes?.map((note) => (
-          <NoteCard key={note.path} note={note} onOpen={onOpenNote} />
+          <NoteCard
+            key={note.path}
+            note={note}
+            onOpen={
+              // 在「疑似重复」里点开就是要处理它：直接进并排对比
+              !searching && selection.kind === "duplicates" && note.id
+                ? () => onCompare([note.id!])
+                : onOpenNote
+            }
+          />
         ))}
       </div>
 

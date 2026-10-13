@@ -41,6 +41,10 @@ class NoteEditBody(BaseModel):
     body: str | None = None
 
 
+class NoteMergeBody(BaseModel):
+    into: str
+
+
 class CategoryCreateBody(BaseModel):
     path: str
 
@@ -88,12 +92,30 @@ def build_router(organizer: Organizer, jobs: JobRegistry) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc))
 
     @router.delete("/api/notes/{note_id}")
-    def api_delete_note(note_id: str) -> dict[str, bool]:
+    def api_delete_note(note_id: str, replaced_by: str | None = None) -> dict[str, bool]:
         try:
-            editor.delete(note_id)
+            editor.delete(note_id, replaced_by=replaced_by or None)
         except NoteNotFound:
             raise HTTPException(status_code=404, detail="笔记不存在")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         return {"deleted": True}
+
+    @router.post("/api/notes/{note_id}/merge")
+    def api_merge_note(note_id: str, body: NoteMergeBody) -> NoteRef:
+        try:
+            return editor.merge(note_id, body.into)
+        except NoteNotFound:
+            raise HTTPException(status_code=404, detail="笔记不存在")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/api/notes/{note_id}/keep")
+    def api_keep_note(note_id: str) -> NoteRef:
+        try:
+            return editor.keep(note_id)
+        except NoteNotFound:
+            raise HTTPException(status_code=404, detail="笔记不存在")
 
     @router.get("/api/tree")
     def api_tree() -> Tree:

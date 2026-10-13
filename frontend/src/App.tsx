@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react"
 
 import { AskPanel } from "@/components/AskPanel"
+import { DuplicateDialog } from "@/components/DuplicateDialog"
 import { IngestPanel } from "@/components/IngestPanel"
 import { NoteDialog } from "@/components/NoteDialog"
 import { NotesPanel } from "@/components/NotesPanel"
@@ -20,7 +21,7 @@ type TabId = (typeof TABS)[number]["id"]
 function App() {
   const [tab, setTab] = useState<TabId>("ingest")
   const [openNote, setOpenNote] = useState<NoteTarget | null>(null)
-  // 笔记的分类在弹窗里被改动的次数：笔记页据此重新加载目录树和列表
+  // 笔记在弹窗里被改动（改分类、编辑、删除、处理疑似重复）的次数：各页据此重新加载
   const [notesVersion, setNotesVersion] = useState(0)
   const noteChanged = useCallback(() => setNotesVersion((v) => v + 1), [])
   const openRef = useCallback(
@@ -29,6 +30,17 @@ function App() {
   )
   const openLink = useCallback((stem: string) => setOpenNote(linkTarget(stem)), [])
   const closeNote = useCallback(() => setOpenNote(null), [])
+  // 等着并排对比的疑似重复笔记的 id，第一条是正在看的
+  const [compare, setCompare] = useState<string[]>([])
+  const openCompare = useCallback((ids: string[]) => {
+    setOpenNote(null)
+    setCompare(ids)
+  }, [])
+  const compareResolved = useCallback(() => {
+    setNotesVersion((v) => v + 1)
+    setCompare((queue) => queue.slice(1))
+  }, [])
+  const closeCompare = useCallback(() => setCompare([]), [])
 
   return (
     <div
@@ -62,13 +74,23 @@ function App() {
       {/* 面板都保持挂载，切换标签不丢输入和结果 */}
       <main>
         <div hidden={tab !== "ingest"}>
-          <IngestPanel active={tab === "ingest" && openNote === null} onOpenNote={openRef} />
+          <IngestPanel
+            active={tab === "ingest" && openNote === null && compare.length === 0}
+            version={notesVersion}
+            onOpenNote={openRef}
+            onCompare={openCompare}
+          />
         </div>
         <div hidden={tab !== "ask"}>
           <AskPanel onOpenNote={openRef} />
         </div>
         <div hidden={tab !== "notes"}>
-          <NotesPanel active={tab === "notes"} version={notesVersion} onOpenNote={openRef} />
+          <NotesPanel
+            active={tab === "notes"}
+            version={notesVersion}
+            onOpenNote={openRef}
+            onCompare={openCompare}
+          />
         </div>
         <div hidden={tab !== "settings"}>
           <SettingsPanel active={tab === "settings"} />
@@ -80,7 +102,16 @@ function App() {
           target={openNote}
           onOpenLink={openLink}
           onChanged={noteChanged}
+          onCompare={openCompare}
           onClose={closeNote}
+        />
+      )}
+      {compare.length > 0 && (
+        <DuplicateDialog
+          noteId={compare[0]}
+          remaining={compare.length - 1}
+          onResolved={compareResolved}
+          onClose={closeCompare}
         />
       )}
     </div>

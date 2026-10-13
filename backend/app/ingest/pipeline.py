@@ -11,6 +11,7 @@ from app.extract.extractor import _image_mime, extract_drafts
 from app.ingest.assemble import assemble_concept, assemble_topic
 from app.organize.service import Organizer
 from app.search.index import SearchIndex
+from app.search.query import find_same_name
 from app.vault import git
 from app.vault.models import Note, SourceKind
 from app.vault.store import VaultStore, sanitize_filename
@@ -63,8 +64,10 @@ def run_ingest(
     # 两种笔记互相链接：概念笔记要写主题笔记的文件名，主题笔记要写概念笔记的文件名。
     # 先按「会分配到的文件名」建概念笔记，再用它们实际的文件名建主题笔记
     topic_stem = store.next_stem(topic.title) if topic is not None else None
+    # 疑似重复在落盘之前就查好：只和**已有的**笔记比，同一次录入产出的笔记之间不互相比
+    duplicates = [find_same_name(index, draft.title) for draft in concepts]
     concept_notes: list[Note] = []
-    for draft, (category, confidence) in zip(concepts, placements):
+    for draft, (category, confidence), duplicate in zip(concepts, placements, duplicates):
         note = assemble_concept(
             draft,
             category=category,
@@ -74,6 +77,7 @@ def run_ingest(
             text=text,
             topic_stem=topic_stem,
             link_targets=link_targets,
+            duplicate_of=duplicate.id if duplicate is not None else None,
         )
         store.create_note(note)
         index.upsert_note(note)

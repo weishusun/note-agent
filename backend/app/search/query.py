@@ -265,6 +265,29 @@ def refs_with_category(index: SearchIndex, category: str) -> list[NoteRef]:
         return [_to_ref(row) for row in _dict_rows(cursor)]
 
 
+def find_same_name(index: SearchIndex, title: str) -> NoteRef | None:
+    """标题或某个别名与 title 相同（大小写不敏感）的已有概念笔记；有多条时取最早建的那条。
+
+    疑似重复的判定（SCHEMA 2.5）。只拿新笔记的**标题**来比，不拿它的别名：
+    「对齐」的别名里有 RLHF，但它和已有的「RLHF」是两个概念。
+    """
+    title = title.strip()
+    if not title:
+        return None
+    with index.connect() as conn:
+        # id 是 ULID，按字典序就是创建顺序
+        cursor = conn.execute(
+            f"SELECT {_ROW_COLUMNS} FROM notes"
+            " WHERE type = 'concept' AND status != 'archived' AND id IS NOT NULL"
+            " AND (title = ? COLLATE NOCASE OR EXISTS ("
+            "   SELECT 1 FROM json_each(notes.aliases) WHERE json_each.value = ? COLLATE NOCASE))"
+            " ORDER BY id LIMIT 1",
+            (title, title),
+        )
+        rows = _dict_rows(cursor)
+    return _to_ref(rows[0]) if rows else None
+
+
 def refs_with_duplicate_of(index: SearchIndex, note_id: str) -> list[NoteRef]:
     """标记为「疑似与 note_id 重复」的全部笔记。那条笔记被删或被合并时要把这些标记清掉。"""
     with index.connect() as conn:

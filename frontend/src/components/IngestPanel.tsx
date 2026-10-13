@@ -12,10 +12,15 @@ const TEXT_LIMIT = 2000
 
 export function IngestPanel({
   active,
+  version,
   onOpenNote,
+  onCompare,
 }: {
   active: boolean
+  // 笔记在别处被改动时递增（比如刚处理完一条疑似重复）：下面列的结果要跟着刷新
+  version: number
   onOpenNote: (note: NoteRef) => void
+  onCompare: (ids: string[]) => void
 }) {
   const [image, setImage] = useState<string | null>(null)
   const [text, setText] = useState("")
@@ -23,6 +28,9 @@ export function IngestPanel({
   const [job, setJob] = useState<JobState | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 录入结果里的笔记后来的样子（处理疑似重复会删掉、合并其中几条）
+  const [fresh, setFresh] = useState<{ job: JobState; notes: NoteRef[] } | null>(null)
+  const seenVersion = useRef(version)
   // 上一次提交的内容，「重新处理」时原样带 force 重发
   const lastInput = useRef<IngestInput | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -88,7 +96,28 @@ export function IngestPanel({
   }
 
   const done = job?.status === "done" ? job : null
-  const notes = done ? [...done.created, ...done.inbox] : []
+
+  useEffect(() => {
+    if (seenVersion.current === version) return
+    seenVersion.current = version
+    if (!done) return
+    let cancelled = false
+    // 按 id 重新取一遍；已经不在了的（被删、被并掉）从结果里去掉
+    void Promise.all(
+      [...done.created, ...done.inbox].map((note) =>
+        note.id ? api.ref(note.id).catch(() => null) : note,
+      ),
+    ).then((refs) => {
+      if (!cancelled) setFresh({ job: done, notes: refs.filter((r) => r !== null) })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [version, done])
+
+  const created = done ? done.created.length + done.inbox.length : 0
+  const notes = !done ? [] : fresh?.job === done ? fresh.notes : [...done.created, ...done.inbox]
+  const suspected = notes.flatMap((n) => (n.duplicate_of && n.id ? [n.id] : []))
 
   return (
     <section className="flex flex-col gap-4">
@@ -189,9 +218,19 @@ export function IngestPanel({
             </Alert>
           ) : (
             <p className="text-sm text-muted-foreground">
-              新建了 {notes.length} 条笔记
+              新建了 {created} 条笔记
               {done.inbox.length > 0 && `，其中 ${done.inbox.length} 条待整理`}
             </p>
+          )}
+          {suspected.length > 0 && (
+            <Alert tone="info">
+              <span className="flex-1">
+                其中 {suspected.length} 条和知识库里已有的笔记同名，疑似重复。它们已经先存下了，可以现在处理，也可以以后在笔记页处理。
+              </span>
+              <Button size="sm" onClick={() => onCompare(suspected)}>
+                对比并处理
+              </Button>
+            </Alert>
           )}
           {notes.map((note) => (
             <NoteCard key={note.path} note={note} onOpen={onOpenNote} />

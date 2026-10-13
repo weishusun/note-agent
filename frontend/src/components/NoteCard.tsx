@@ -27,6 +27,11 @@ export function NoteCard({
               主题
             </span>
           )}
+          {note.duplicate_of && (
+            <span className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-700 dark:text-amber-300">
+              疑似重复
+            </span>
+          )}
         </span>
         <span className="mt-0.5 block text-sm text-muted-foreground">{note.summary}</span>
         <span className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground">

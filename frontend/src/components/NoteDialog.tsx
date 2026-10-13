@@ -16,15 +16,19 @@ export function NoteDialog({
   target,
   onOpenLink,
   onChanged,
+  onCompare,
   onClose,
 }: {
   target: NoteTarget
   onOpenLink: (stem: string) => void
   // 这条笔记被改动或删除了：让目录树和列表重新加载
   onChanged: () => void
+  // 这条笔记疑似重复时，去并排对比它和撞上的那条
+  onCompare: (ids: string[]) => void
   onClose: () => void
 }) {
   const [loaded, setLoaded] = useState<Loaded | null>(null)
+  const [duplicateTitle, setDuplicateTitle] = useState<string | null>(null)
   const [mode, setMode] = useState<Mode>("view")
   const [tree, setTree] = useState<Tree | null>(null)
   const [busy, setBusy] = useState(false)
@@ -63,6 +67,20 @@ export function NoteDialog({
   const current = loaded && "detail" in loaded ? loaded : null
   const frontmatter = current?.detail.frontmatter
   const noteId = frontmatter?.id ?? null
+  const duplicateOf = frontmatter?.duplicate_of ?? null
+
+  useEffect(() => {
+    setDuplicateTitle(null)
+    if (!duplicateOf) return
+    let cancelled = false
+    api.ref(duplicateOf).then(
+      (ref) => !cancelled && setDuplicateTitle(ref.title),
+      () => undefined,
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [duplicateOf])
 
   function enter(next: Mode) {
     setMode(next)
@@ -148,6 +166,16 @@ export function NoteDialog({
                   <span>别名：{frontmatter.aliases.join("、")}</span>
                 )}
               </div>
+            )}
+            {mode === "view" && noteId && duplicateOf && (
+              <Alert tone="info">
+                <span className="flex-1">
+                  和知识库里已有的笔记{duplicateTitle ? `「${duplicateTitle}」` : ""}疑似重复。
+                </span>
+                <Button size="sm" disabled={busy} onClick={() => onCompare([noteId])}>
+                  对比并处理
+                </Button>
+              </Alert>
             )}
             {frontmatter && mode === "view" && noteId && (
               <div className="flex flex-wrap gap-1.5">

@@ -327,3 +327,93 @@ def test_invalid_requests_rejected(
 
 def test_unknown_job_is_404(client: TestClient) -> None:
     assert client.get("/api/jobs/不存在").status_code == 404
+
+
+# ---------- 疑似重复（SCHEMA 2.5） ----------
+
+
+def _concept(title: str, aliases: list[str] | None = None) -> NoteDraft:
+    return NoteDraft(title=title, summary=f"{title}的概要。", points=["一条要点"], aliases=aliases or [])
+
+
+def _refs(client: TestClient, **params) -> dict[str, dict]:
+    return {r["path"]: r for r in client.get("/api/notes", params=params).json()}
+
+
+@pytest.fixture
+def no_placement(monkeypatch: pytest.MonkeyPatch, stubs: Stubs) -> None:
+    """这一组测试不关心分类：让归类对任何标题都给同一个结果。"""
+    monkeypatch.setattr(
+        classifier,
+        "classify_notes",
+        lambda briefs, tree: [Placement(parent="AI工程", child="RAG", confidence=0.9) for _ in briefs],
+    )
+
+
+def test_new_concept_with_the_same_name_is_saved_and_flagged(
+    client: TestClient, vault_root: Path, stubs: Stubs
+) -> None:
+    first = _ingest(client, kind="text", text="第一次")
+    by_title = {r["title"]: r for r in [*first["created"], *first["inbox"]]}
+    assert all(r["duplicate_of"] is None for r in by_title.values())
+    old_rag = _read(vault_root, "RAG.md")
+
+    second = _ingest(client, kind="text", text="第二次，讲的还是这些")
+    new = {r["path"]: r for r in [*second["created"], *second["inbox"]]}
+
+    # 新笔记照常保存、照常归类，只是打了标记
+    assert new["notes/RAG (2).md"]["duplicate_of"] == by_title["RAG"]["id"]
+    assert new["notes/RAG (2).md"]["category"] == "AI工程/RAG"
+    assert new["notes/Fine-tuning (2).md"]["duplicate_of"] == by_title["Fine-tuning"]["id"]
+    assert f"duplicate_of: {by_title['RAG']['id']}" in _read(vault_root, "RAG (2).md")
+    # 主题笔记不做重复判定
+    assert new["notes/RAG 与微调的对比 (2).md"]["duplicate_of"] is None
+    # 已有的笔记一个字都不动（不变量 5）
+    assert _read(vault_root, "RAG.md") == old_rag
+
+    assert sorted(_refs(client, duplicates="true")) == ["notes/Fine-tuning (2).md", "notes/RAG (2).md"]
+    assert client.get("/api/tree").json()["duplicates"] == 2
+
+
+def test_title_is_compared_with_existing_titles_and_aliases_ignoring_case(
+    client: TestClient, stubs: Stubs, no_placement: None
+) -> None:
+    stubs.extraction = Extraction(topic=None, concepts=[_concept("监督微调", aliases=["SFT"])])
+    old = _ingest(client, kind="text", text="旧的")["created"][0]
+
+    stubs.extraction = Extraction(
+        topic=None,
+        concepts=[
+            _concept("sft"),  # 和已有笔记的别名相同（大小写不同）
+            _concept("对齐", aliases=["监督微调"]),  # 只是别名撞上：不算
+            _concept("LoRA"),
+        ],
+    )
+    job = _ingest(client, kind="text", text="新的")
+
+    assert {r["title"]: r["duplicate_of"] for r in job["created"]} == {
+        "sft": old["id"],
+        "对齐": None,
+        "LoRA": None,
+    }
+
+
+def test_notes_from_the_same_ingest_are_not_compared_with_each_other(
+    client: TestClient, stubs: Stubs, no_placement: None
+) -> None:
+    stubs.extraction = Extraction(topic=None, concepts=[_concept("SFT"), _concept("SFT")])
+    job = _ingest(client, kind="text", text="同一批里有两条同名的")
+    assert [(r["path"], r["duplicate_of"]) for r in job["created"]] == [
+        ("notes/SFT.md", None),
+        ("notes/SFT (2).md", None),
+    ]
+
+
+def test_the_earliest_matching_note_is_the_one_pointed_at(
+    client: TestClient, stubs: Stubs, no_placement: None
+) -> None:
+    stubs.extraction = Extraction(topic=None, concepts=[_concept("SFT")])
+    first = _ingest(client, kind="text", text="一")["created"][0]
+    second = _ingest(client, kind="text", text="二")["created"][0]
+    third = _ingest(client, kind="text", text="三")["created"][0]
+    assert (second["duplicate_of"], third["duplicate_of"]) == (first["id"], first["id"])
