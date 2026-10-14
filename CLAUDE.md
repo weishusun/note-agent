@@ -8,13 +8,15 @@
 
 ## 模型与外部服务
 
-- 默认服务商：智谱开放平台，OpenAI 兼容接口。设置页可以换成其他 OpenAI 兼容的服务商
+- 默认服务商：智谱开放平台，OpenAI 兼容接口。设置页可以连多家（清单在 `backend/app/providers.yaml`），
+  看图、文字、问答、向量四个环节各自选用哪家的哪个模型
 - 接口地址、密钥、模型名有两层来源：`.env` 给默认值（GLM_BASE_URL / ZHIPU_API_KEY /
   EXTRACT_MODEL，当前 glm-4.6v / CLASSIFY_MODEL，当前 glm-4.5-air / ANSWER_MODEL / EMBED_MODEL 向量模型），
   设置页保存到 `note-agent/settings.json` 的值逐项覆盖
 - 应用代码一律经 `app.settings.load()` 取这些值，不直接读环境变量或 `app.config`
   （`evals/` 脚本例外，它们只认 `.env`）
-- 代码中禁止出现任何硬编码的模型名字符串
+- 代码中禁止出现任何硬编码的模型名字符串。唯一的例外是 `backend/app/providers.yaml`：
+  各家服务商的推荐模型写在这个数据文件里（2026-10-14 使用者同意），代码只读它
 - `settings.json` 含密钥，已被 `.gitignore` 忽略，不得提交；接口不得把完整密钥返回给前端
 - 本项目不使用 Anthropic / OpenAI 的模型。pyproject.toml 里的 langchain-anthropic
   是骨架期残留，未被任何代码 import，请一并移除

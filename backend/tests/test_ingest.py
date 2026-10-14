@@ -793,7 +793,7 @@ def similarity(monkeypatch: pytest.MonkeyPatch, isolated_settings: Path, no_plac
     monkeypatch.setattr(model_client, "embed_texts", fake.embed)
     monkeypatch.setattr(similar, "judge_same_concept", fake.judge)
     monkeypatch.setattr(vectors_module, "SYNC_DELAY_SECONDS", 0.0)
-    settings.save({"embed_model": "fake-embed"})
+    settings.save({"embed": {"model": "fake-embed"}})
     return fake
 
 
@@ -886,7 +886,7 @@ def test_vectors_computed_while_checking_are_not_computed_again(
 def test_no_similarity_check_without_an_embedding_model(
     client: TestClient, stubs: Stubs, similarity: Similarity
 ) -> None:
-    settings.save({"embed_model": ""})
+    settings.save({"embed": {"model": ""}})
     _ingest_concepts(client, stubs, "第一次", _concept("SFT"))
     [new] = _ingest_concepts(client, stubs, "第二次", _concept("有监督微调"))
     assert (similarity.embed_calls, similarity.judged, new["duplicate_of"]) == ([], [], None)

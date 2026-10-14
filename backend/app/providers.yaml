@@ -1,0 +1,87 @@
+# 设置页列出的模型服务商。都走 OpenAI 兼容接口。
+#
+# 模型名只允许出现在这里（各家的推荐模型）和使用者自己的设置里，代码里没有（见 CLAUDE.md）。
+# 哪家出了新模型、改了名，改这个文件就行。设置页以服务商接口实时返回的模型列表为主，
+# 这里的推荐只是默认值；「测试连接」会用真实请求逐个验证选中的模型。
+#
+# 字段：
+#   key_url      在哪里创建 API Key
+#   key_hint     Key 长什么样，显示在输入框里
+#   key_pattern  只有格式独特的才写：粘贴进别家的输入框时，据此提示「这像是 X 的 Key」
+#   no_thinking  关闭思考模式时随请求带上的参数（各家写法不同；不认识的参数有的服务商会报错）
+#   model_list   GET /models 能列出哪些模型：all = 全部；text = 只列文字模型（看图、向量的查不到）
+#   verified     是否在本项目里用真实接口测过。false 的推荐模型是按各家文档整理的（2026-10），可能已经改名
+#   models       推荐模型，第一个是默认值：vision 看图提取，text 分类/整理/问答，embed 向量检索。
+#                某项为空表示这家没有这类模型，这一环要另选一家
+
+providers:
+  - id: zhipu
+    name: 智谱
+    base_url: https://open.bigmodel.cn/api/paas/v4/
+    key_url: https://bigmodel.cn/usercenter/proj-mgmt/apikeys
+    key_hint: 一长串字母数字，中间有一个点
+    key_pattern: '^[0-9a-f]{32}\.[A-Za-z0-9]{16}$'
+    no_thinking: {thinking: {type: disabled}}
+    model_list: text
+    verified: true
+    models:
+      vision: [glm-4.6v, glm-4.6v-flash]
+      text: [glm-4.5-air, glm-4.6]
+      embed: [embedding-3]
+
+  - id: deepseek
+    name: DeepSeek
+    base_url: https://api.deepseek.com
+    key_url: https://platform.deepseek.com/api_keys
+    key_hint: sk- 开头
+    no_thinking: {thinking: {type: disabled}}
+    model_list: all
+    verified: false
+    models:
+      vision: [deepseek-flash]
+      text: [deepseek-flash, deepseek-v4-pro]
+      embed: []
+    note: 没有向量模型。向量检索要另选一家，或者留空只做字面检索。
+
+  - id: dashscope
+    name: 阿里云百炼（通义千问）
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    key_url: https://bailian.console.aliyun.com/?tab=model#/api-key
+    key_hint: sk- 开头（北京地域的 Key）
+    no_thinking: {enable_thinking: false}
+    model_list: all
+    verified: false
+    models:
+      vision: [qwen3-vl-plus, qwen-vl-plus]
+      text: [qwen-plus, qwen3.5-flash]
+      embed: [text-embedding-v4]
+    note: Key 按地域区分，这里的地址是北京地域。
+
+  - id: siliconflow
+    name: 硅基流动
+    base_url: https://api.siliconflow.cn/v1
+    key_url: https://cloud.siliconflow.cn/account/ak
+    key_hint: sk- 开头
+    no_thinking: {enable_thinking: false}
+    model_list: all
+    verified: false
+    models:
+      vision: [Qwen/Qwen3-VL-235B-A22B-Instruct, Qwen/Qwen2.5-VL-72B-Instruct]
+      text: [Qwen/Qwen3-235B-A22B-Instruct-2507, deepseek-ai/DeepSeek-V3.2]
+      embed: [BAAI/bge-m3, Qwen/Qwen3-Embedding-8B]
+    note: 聚合了很多开源模型，模型名带机构前缀（比如 Qwen/…）。
+
+  - id: ark
+    name: 火山方舟（豆包）
+    base_url: https://ark.cn-beijing.volces.com/api/v3
+    key_url: https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey
+    key_hint: 带短横线的一串字母数字
+    key_pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    no_thinking: {thinking: {type: disabled}}
+    model_list: all
+    verified: false
+    models:
+      vision: [doubao-seed-2-1-pro-260915]
+      text: [doubao-seed-2-1-pro-260915]
+      embed: [doubao-embedding-text-240515]
+    note: 模型要先在方舟控制台的「开通管理」里开通；向量模型有时要填推理接入点 ID（ep- 开头）。

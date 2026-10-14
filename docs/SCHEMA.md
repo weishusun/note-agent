@@ -6,6 +6,7 @@
 
 **版本:v9**
 第 6 步(打包成桌面应用)没有改数据格式,版本号不变:新增 §7「桌面版运行时」和 `GET /api/locations`(§5)。
+设置页改版(各环节可分用不同服务商)同样不涉及笔记和索引,版本号不变:设置的格式、`GET /api/providers`、`POST /api/providers/{id}/models` 见 §5。
 
 v8 → v9 变更(界面改版,列表里显示截图缩略图):`NoteRef` 新增 `image`,索引的 `notes` 表新增 `image` 列(§4、§5)。
 
@@ -815,40 +816,85 @@ CREATE TABLE embeddings (
 
 知识库文件夹和设置文件在本机的绝对路径,设置页显示用。
 
+### `GET /api/providers` → `[Provider]`
+
+设置页列出的服务商,来自 `backend/app/providers.yaml`(各家的地址、在哪创建 Key、推荐模型)。
+**模型名只写在这个文件和使用者的设置里,代码里没有**;哪家改了模型名,改这个文件即可。
+
+```jsonc
+{
+  "id": "zhipu", "name": "智谱", "base_url": "https://…/v4/",
+  "key_url": "https://…",                 // 在哪里创建 API Key
+  "key_hint": "一长串字母数字,中间有一个点",
+  "key_pattern": "^…$",                   // 只有格式独特的才有:粘贴进别家的输入框时提示「这像是智谱的 Key」
+  "model_list": "text",                   // GET /models 能列出哪些:all 全部;text 只列文字模型(智谱实测如此)
+  "verified": true,                       // 在本项目里用真实接口测过;false 的推荐按官方文档整理
+  "models": { "vision": ["…"], "text": ["…"], "embed": ["…"] },   // 推荐,第一个是默认值;空 = 这家没有
+  "note": "…"
+}
+```
+
+关闭思考时各家要带的参数(`no_thinking`)也在这个文件里,不返回给前端。清单之外的服务商 id 为 `custom`,
+地址由使用者填,不带关闭思考的参数(不认识的参数有的服务商会报错)。
+
+### `POST /api/providers/{id}/models` → `{ "status": "ok", "models": ["…"], "detail": "11 个模型" }`
+
+请求体 `{ "api_key"?: "…", "base_url"?: "…" }`(不带 Key 就用已保存的;`base_url` 只对 `custom` 有用)。
+用这把 Key 向**这一家**请求 `GET {base_url}/models`,顺便验证 Key;**不保存任何东西**。
+`status`:`ok`;`bad_key`(401/403);`unsupported`(这家不提供列表接口或格式看不懂,Key 未必有问题);
+`error`(网络等,`detail` 里是原因)。不认识的服务商、没有 Key 返回 `400`。
+
 ### `GET /api/settings` / `PUT /api/settings`
 
 模型设置。不属于 vault:保存在设置文件里(含密钥,不入 git)。浏览器开发时是 `note-agent/settings.json`,
 逐项覆盖 `.env` 的默认值;桌面版的位置见 §7,不读 `.env`。保存后立即生效。
 
+**每个环节可以用不同的服务商**(比如文字用 DeepSeek,看图和向量用智谱):`providers` 存各家的 Key,
+四个环节各自记「哪家 + 哪个模型」。
+
 ```jsonc
-// GET 的响应，也是 PUT 的响应
+// GET 的响应,也是 PUT 的响应
 {
-  "base_url": "https://open.bigmodel.cn/api/paas/v4/",
-  "api_key_set": true,
-  "api_key_hint": "abcd",              // 末四位；密钥不足 8 位时为 null
-  "extract_model": "…",                 // 必须支持图片
-  "classify_model": "…",                // 也用于压缩超长文本和扩展检索词
-  "answer_model": "",                   // 空 = 沿用 classify_model
-  "embed_model": "",                    // 向量模型。空 = 不做向量检索，只做字面检索
-  "disable_thinking": true,             // 分类等小调用关闭思考（智谱专有参数）
-  "extract_disable_thinking": true      // 看图提取是否关闭思考，默认关：开着一张图要 100 秒以上
+  "providers": {                         // 已经填了 Key 的服务商
+    "zhipu": { "base_url": "https://…/v4/", "api_key_set": true, "api_key_hint": "abcd" }   // 末四位;不足 8 位为 null
+  },
+  "extract":  { "provider": "zhipu", "model": "…" },   // 看图,必须支持图片
+  "classify": { "provider": "zhipu", "model": "…" },   // 文字:分类、整理长文、扩展检索词
+  "answer":   { "provider": "", "model": "" },         // 问答;空 = 整个沿用 classify(服务商也一起)
+  "embed":    { "provider": "zhipu", "model": "…" },   // 向量;空 = 不做向量检索,只做字面检索
+  "disable_thinking": true,             // 分类等小调用关闭思考(参数按服务商自动选)
+  "extract_disable_thinking": true      // 看图提取是否关闭思考,默认关:开着一张图要 100 秒以上(智谱实测)
+}
+```
+
+```jsonc
+// PUT 的请求体:只带要改的项
+{
+  "providers": { "deepseek": { "api_key": "sk-…" },        // api_key 为空表示保持不变
+                 "custom": { "base_url": "https://…/v1", "api_key": "…" },
+                 "ark": null },                              // null = 删掉这家(连同 Key)
+  "classify": { "provider": "deepseek", "model": "…" }
 }
 ```
 
 - **密钥只进不出。** 任何接口都不返回完整密钥。
-- `PUT` 只改请求体里带了的字段;`api_key` 为空或不带表示保持不变。`base_url` 必须以 `http(s)://` 开头。
+- 清单里的服务商地址跟着 `providers.yaml` 走,`PUT` 里给的 `base_url` 对它们无效;`custom` 必须有 `base_url`
+  (必须以 `http(s)://` 开头)。不认识的服务商返回 `400`。
 - 某项存成空字符串表示「没填」,退回 `.env` 的默认值。
+- **旧格式自动换算。** 旧版设置文件是平铺的(`base_url`、`api_key`、`extract_model`…):读的时候按地址认出是哪家
+  (认不出就是 `custom`),四个环节都用它;下次保存时写成新格式。`.env` 也按这个规则换算成一家服务商。
 - **所有结构化输出一律用 JSON 模式**,输出结构写在提示词里;不用函数调用——实测智谱的函数调用处理不了嵌套结构,
   关闭思考后更是直接输出坏的内容。所以没有「结构化输出方式」这个设置。
 
 ### `POST /api/settings/test`
 
-用已保存的设置各发一次真实请求:分类模型一句话,提取模型一张小图,向量模型一句话。
+用已保存的设置各发一次真实请求:文字模型一句话,看图模型一张小图,向量模型一句话;问答模型单独选了才测它。
 
 ```jsonc
 { "text": { "ok": true, "detail": "正常", "seconds": 0.8 },
   "vision": { "ok": false, "detail": "…错误原因…", "seconds": 1.2 },
-  "embedding": { "ok": true, "detail": "2048 维", "seconds": 0.4 } }   // 没填向量模型时没有这一项
+  "answer": { "ok": true, "detail": "正常", "seconds": 2.1 },        // 问答没单独选时没有这一项
+  "embedding": { "ok": true, "detail": "2048 维", "seconds": 0.4 } }   // 没选向量模型时没有这一项
 ```
 
 ### `GET /api/vectors` / `POST /api/vectors/sync`

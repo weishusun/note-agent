@@ -61,7 +61,7 @@ def embedder(monkeypatch: pytest.MonkeyPatch) -> Embedder:
 
 @pytest.fixture
 def embed_model(isolated_settings: Path) -> None:
-    settings.save({"embed_model": "fake-embed"})
+    settings.save({"embed": {"model": "fake-embed"}})
 
 
 @pytest.fixture
@@ -171,7 +171,7 @@ def test_deleted_and_archived_notes_lose_their_vectors(
 def test_changing_the_model_re_embeds_everything(
     index: SearchIndex, vectors: VectorIndex, embedder: Embedder, notes
 ) -> None:
-    settings.save({"embed_model": "another-embed"})
+    settings.save({"embed": {"model": "another-embed"}})
     # 换了模型：旧模型算的向量不能拿来比，检索时当它们不存在
     assert vectors.search(normalize(fake_vector("微调"))) == []
     assert vectors.sync() == 3
@@ -319,8 +319,8 @@ def test_api_vectors_status_and_settings(
     assert api.get("/api/vectors").json()["enabled"] is False
     assert "embedding" not in api.post("/api/settings/test").json()  # 没填就不测
 
-    saved = api.put("/api/settings", json={"embed_model": "  fake-embed "}).json()
-    assert saved["embed_model"] == "fake-embed"
+    saved = api.put("/api/settings", json={"embed": {"model": "  fake-embed "}}).json()
+    assert saved["embed"]["model"] == "fake-embed"
     probe = api.post("/api/settings/test").json()["embedding"]
     assert (probe["ok"], probe["detail"]) == (True, "5 维")
 

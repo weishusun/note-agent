@@ -1,6 +1,6 @@
-"""模型客户端工厂(OpenAI 兼容接口,默认智谱 GLM) + 结构化输出封装。
+"""模型客户端工厂(OpenAI 兼容接口,各环节可以用不同的服务商) + 结构化输出封装。
 
-接口地址、密钥、模型名一律从 app.settings 现读(.env 给默认值,设置页保存的值覆盖),
+服务商、密钥、模型名一律从 app.settings 现读(.env 给默认值,设置页保存的值覆盖),
 **代码里绝不出现硬编码模型名**。langchain_openai 的 import 放在函数内(惰性):
 测试 mock 掉本工厂时无需导入 SDK,也不碰网络。
 """
@@ -25,46 +25,37 @@ _EMBED_TIMEOUT_SECONDS = 30.0
 # 整理长资料:一次调用要读一两万字、写出上千字
 _DIGEST_TIMEOUT_SECONDS = 240.0
 
-_NO_THINKING = {"thinking": {"type": "disabled"}}
-
-
-def _resolve_model(override: str | None, configured: str | None, label: str) -> str:
-    """override 优先,否则用设置里的值。两者皆空则报错——不允许默认模型名。"""
-    name = override or configured
-    if not name:
-        raise RuntimeError(f"还没有配置{label}:请到设置页填写,或在 note-agent/.env 里配置")
-    return name
-
-
 def _build(
-    model_name: str,
-    current: settings.Settings,
+    role: settings.RoleName,
+    override: str | None = None,
     timeout: float = _TIMEOUT_SECONDS,
     max_retries: int = 1,
     no_thinking: bool = False,
 ):
+    """按设置里这个环节选的服务商和模型建客户端。override 只换模型名，服务商不变。
+
+    关闭思考的参数各家写法不同，来自 providers.yaml；自定义服务商不带（不认识的参数有的会报错）。
+    """
     from langchain_openai import ChatOpenAI
 
-    if not current.api_key:
-        raise RuntimeError(
-            "还没有配置 API Key:请到设置页填写,或在 note-agent/.env 里配置 ZHIPU_API_KEY"
-        )
+    current = settings.load()
+    if override:
+        current.choice(role).model = override
+    target = current.endpoint(role)
     return ChatOpenAI(
-        model=model_name,
-        api_key=current.api_key,
-        base_url=current.base_url,
+        model=target.model,
+        api_key=target.api_key,
+        base_url=target.base_url,
         temperature=_TEMPERATURE,
         timeout=timeout,
         max_retries=max_retries,
-        extra_body=_NO_THINKING if no_thinking else None,
+        extra_body=target.no_thinking if no_thinking else None,
     )
 
 
 def get_extract_model(override: str | None = None):
     """视觉/提取模型。默认关闭思考(设置里可以打开):开着一张图要 100 秒以上。"""
-    current = settings.load()
-    name = _resolve_model(override, current.extract_model, "提取模型")
-    return _build(name, current, no_thinking=current.extract_disable_thinking)
+    return _build("extract", override, no_thinking=settings.load().extract_disable_thinking)
 
 
 def get_classify_model(override: str | None = None):
@@ -73,37 +64,33 @@ def get_classify_model(override: str | None = None):
     实测 glm-4.5-air 默认开着思考模式,分类一条草稿要 5 秒左右;关掉后不到 1 秒。
     关闭思考后它的 function calling 输出是坏的,所以调用方必须用 bind_json。
     """
-    current = settings.load()
-    name = _resolve_model(override, current.classify_model, "分类模型")
-    return _build(name, current, no_thinking=current.disable_thinking)
+    return _build("classify", override, no_thinking=settings.load().disable_thinking)
 
 
 def get_digest_model(override: str | None = None):
     """整理长资料用的文本模型(同分类模型)。输入长、输出也长,超时放宽。"""
-    current = settings.load()
-    name = _resolve_model(override, current.classify_model, "分类模型")
     return _build(
-        name, current, timeout=_DIGEST_TIMEOUT_SECONDS, no_thinking=current.disable_thinking
+        "classify",
+        override,
+        timeout=_DIGEST_TIMEOUT_SECONDS,
+        no_thinking=settings.load().disable_thinking,
     )
 
 
 def get_expand_model(override: str | None = None):
     """检索词扩展用的文本模型(同分类模型),超时短、不重试、默认关闭思考。"""
-    current = settings.load()
-    name = _resolve_model(override, current.classify_model, "分类模型")
     return _build(
-        name,
-        current,
+        "classify",
+        override,
         timeout=_EXPAND_TIMEOUT_SECONDS,
         max_retries=0,
-        no_thinking=current.disable_thinking,
+        no_thinking=settings.load().disable_thinking,
     )
 
 
 def get_answer_model(override: str | None = None):
-    """问答模型(未配置时沿用分类模型)。保持思考开启:回答质量是用户直接看到的。"""
-    current = settings.load()
-    return _build(_resolve_model(override, current.effective_answer_model, "问答模型"), current)
+    """问答模型(没选时沿用文字模型)。保持思考开启:回答质量是用户直接看到的。"""
+    return _build("answer", override)
 
 
 def bind_json(model, schema):
@@ -126,18 +113,16 @@ def embed_texts(texts: list[str], override: str | None = None) -> list[list[floa
     from openai import OpenAI
 
     current = settings.load()
-    name = _resolve_model(override, current.embed_model, "向量模型")
-    if not current.api_key:
-        raise RuntimeError(
-            "还没有配置 API Key:请到设置页填写,或在 note-agent/.env 里配置 ZHIPU_API_KEY"
-        )
+    if override:
+        current.embed.model = override
+    target = current.endpoint("embed")
     api = OpenAI(
-        api_key=current.api_key,
-        base_url=current.base_url,
+        api_key=target.api_key,
+        base_url=target.base_url,
         timeout=_EMBED_TIMEOUT_SECONDS,
         max_retries=1,
     )
-    response = api.embeddings.create(model=name, input=texts)
+    response = api.embeddings.create(model=target.model, input=texts)
     vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
     if len(vectors) != len(texts):
         raise RuntimeError(f"向量接口返回了 {len(vectors)} 个向量,应该是 {len(texts)} 个")
@@ -191,14 +176,11 @@ def probe_text() -> dict:
     """用分类模型发一句话,返回 {ok, detail, seconds}。"""
 
     def build():
-        current = settings.load()
-        name = _resolve_model(None, current.classify_model, "分类模型")
         return _build(
-            name,
-            current,
+            "classify",
             timeout=_PROBE_TIMEOUT_SECONDS,
             max_retries=0,
-            no_thinking=current.disable_thinking,
+            no_thinking=settings.load().disable_thinking,
         )
 
     return _probe(build, "只回复两个字:正常")
@@ -208,14 +190,11 @@ def probe_vision() -> dict:
     """给提取模型发一张纯色小图,确认它真的能看图。"""
 
     def build():
-        current = settings.load()
-        name = _resolve_model(None, current.extract_model, "提取模型")
         return _build(
-            name,
-            current,
+            "extract",
             timeout=_PROBE_TIMEOUT_SECONDS,
             max_retries=0,
-            no_thinking=current.extract_disable_thinking,
+            no_thinking=settings.load().extract_disable_thinking,
         )
 
     url = "data:image/png;base64," + base64.b64encode(_png()).decode("ascii")
@@ -226,3 +205,46 @@ def probe_vision() -> dict:
             {"type": "image_url", "image_url": {"url": url}},
         ],
     )
+
+
+def probe_answer() -> dict:
+    """问答模型单独选了的时候测它（和文字模型同一句话）。"""
+    return _probe(
+        lambda: _build("answer", timeout=_PROBE_TIMEOUT_SECONDS, max_retries=0),
+        "只回复两个字:正常",
+    )
+
+
+# ---------- 列出服务商的模型(设置页用) ----------
+
+_LIST_TIMEOUT_SECONDS = 15.0
+
+
+def list_models(base_url: str, api_key: str) -> dict:
+    """GET {base_url}/models,顺便验证 Key。返回 {status, models, detail}:
+
+    status 为 ok(models 是模型名,按名字排好)、bad_key(401/403)、unsupported(这家不提供列表接口)
+    或 error(网络等其他问题,detail 里是原因)。不是每家都能列全:智谱只列文字模型,看图、向量的列不出来。
+    """
+    import httpx
+
+    url = base_url.rstrip("/") + "/models"
+    try:
+        resp = httpx.get(
+            url, headers={"Authorization": f"Bearer {api_key}"}, timeout=_LIST_TIMEOUT_SECONDS
+        )
+    except httpx.HTTPError as exc:
+        return {"status": "error", "models": [], "detail": f"连不上 {base_url}：{exc}"[:300]}
+    if resp.status_code in (401, 403):
+        return {"status": "bad_key", "models": [], "detail": "Key 不对，或者没有权限"}
+    if resp.status_code in (404, 405):
+        return {"status": "unsupported", "models": [], "detail": "这家不提供模型列表，模型名请照推荐或文档填"}
+    if resp.status_code >= 400:
+        return {"status": "error", "models": [], "detail": f"HTTP {resp.status_code}：{resp.text[:200]}"}
+    try:
+        data = resp.json()
+        items = data.get("data", []) if isinstance(data, dict) else data
+        models = sorted({str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")})
+    except (ValueError, TypeError, KeyError):
+        return {"status": "unsupported", "models": [], "detail": "模型列表的格式看不懂"}
+    return {"status": "ok", "models": models, "detail": f"{len(models)} 个模型"}
