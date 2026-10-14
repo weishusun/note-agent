@@ -115,23 +115,70 @@ export interface Locations {
   settings: string
 }
 
-export interface SettingsView {
+// 设置页列出的服务商（backend/app/providers.yaml）
+export type ModelKind = "vision" | "text" | "embed"
+export interface ProviderInfo {
+  id: string
+  name: string
+  base_url: string
+  key_url: string | null
+  key_hint: string | null
+  // 只有格式独特的 Key 才有：粘贴进别家的输入框时据此提示
+  key_pattern: string | null
+  // GET /models 能列出哪些：all 全部；text 只有文字模型（看图、向量的列不出来）
+  model_list: "all" | "text"
+  // 在本项目里用真实接口测过
+  verified: boolean
+  // 推荐模型，第一个是默认值；某类为空表示这家没有
+  models: Record<ModelKind, string[]>
+  note: string | null
+}
+
+// 自定义服务商（清单之外，自己填地址）的 id
+export const CUSTOM_PROVIDER = "custom"
+
+export type RoleName = "extract" | "classify" | "answer" | "embed"
+
+export interface ModelList {
+  status: "ok" | "bad_key" | "unsupported" | "error"
+  models: string[]
+  detail: string
+}
+
+export interface AccountView {
   base_url: string
   api_key_set: boolean
   api_key_hint: string | null
-  extract_model: string
-  classify_model: string
-  answer_model: string
-  // 留空则不做向量检索
-  embed_model: string
+}
+
+export interface RoleChoice {
+  provider: string
+  model: string
+}
+
+export interface SettingsView {
+  // 已经填了 Key 的服务商
+  providers: Record<string, AccountView>
+  extract: RoleChoice
+  classify: RoleChoice
+  // 模型为空 = 沿用文字模型（classify）
+  answer: RoleChoice
+  // 模型为空 = 不做向量检索
+  embed: RoleChoice
   disable_thinking: boolean
   extract_disable_thinking: boolean
 }
 
-// 只发要改的项；api_key 留空表示不修改
-export type SettingsUpdate = Partial<
-  Omit<SettingsView, "api_key_set" | "api_key_hint"> & { api_key: string }
->
+// 只发要改的项。某家服务商给 null 表示删掉它；api_key 留空表示不修改
+export interface SettingsUpdate {
+  providers?: Record<string, { api_key?: string; base_url?: string } | null>
+  extract?: Partial<RoleChoice>
+  classify?: Partial<RoleChoice>
+  answer?: Partial<RoleChoice>
+  embed?: Partial<RoleChoice>
+  disable_thinking?: boolean
+  extract_disable_thinking?: boolean
+}
 
 // 向量索引的进度：total 条笔记里有 embedded 条已经算好了向量
 export interface VectorStatus {
@@ -283,11 +330,15 @@ export const api = {
   reclassify: (scope: "unsorted" | "all") => post<{ job_id: string }>("/api/reclassify", { scope }),
 
   locations: () => request<Locations>("/api/locations"),
+  providers: () => request<ProviderInfo[]>("/api/providers"),
+  // 用这家的 Key 问它有哪些模型（顺便验证 Key），不保存。不带 Key 就用已保存的
+  providerModels: (provider: string, body: { api_key?: string; base_url?: string } = {}) =>
+    post<ModelList>(`/api/providers/${encodeURIComponent(provider)}/models`, body),
   settings: () => request<SettingsView>("/api/settings"),
   saveSettings: (update: SettingsUpdate) => send<SettingsView>("PUT", "/api/settings", update),
   // 没填向量模型时结果里没有 embedding
   testSettings: () =>
-    post<{ text: ProbeResult; vision: ProbeResult; embedding?: ProbeResult }>(
+    post<{ text: ProbeResult; vision: ProbeResult; answer?: ProbeResult; embedding?: ProbeResult }>(
       "/api/settings/test",
       {},
     ),
