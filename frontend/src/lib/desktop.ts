@@ -5,6 +5,10 @@ export interface DesktopBridge {
   chooseVault(): Promise<boolean>
   // 在资源管理器里打开当前的知识库文件夹
   openVault(): Promise<void>
+  // 桌面快捷方式："ok" 指向当前的 exe，"stale" 指向别处（exe 挪过位置），"missing" 没有
+  shortcutStatus(): Promise<"ok" | "stale" | "missing">
+  // 建（或重建）桌面快捷方式
+  createShortcut(): Promise<{ ok: boolean; path: string; error?: string }>
 }
 
 declare global {

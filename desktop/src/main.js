@@ -107,17 +107,42 @@ function message(parent, options) {
   return parent ? dialog.showMessageBox(parent, full) : dialog.showMessageBox(full)
 }
 
+// 测试时用 NOTE_AGENT_SHORTCUT_DIR 指到别处，免得往真的桌面上放东西
+function shortcutPath() {
+  return path.join(process.env.NOTE_AGENT_SHORTCUT_DIR || app.getPath("desktop"), "知识库.lnk")
+}
+
+// 在桌面建（或重建）指向当前 exe 的快捷方式。返回 { ok, path, error? }
 function createDesktopShortcut() {
-  // 开发时 execPath 是 electron.exe，不建
-  if (!app.isPackaged) return
-  shell.writeShortcutLink(path.join(app.getPath("desktop"), "知识库.lnk"), "create", {
-    target: process.execPath,
-    cwd: path.dirname(process.execPath),
-    description: "知识库",
-    icon: process.execPath,
-    iconIndex: 0,
-    appUserModelId: "note-agent",
-  })
+  const link = shortcutPath()
+  // 开发时 execPath 是 electron.exe，建了也打不开知识库
+  if (!app.isPackaged) return { ok: false, path: link, error: "开发模式下不创建快捷方式，请用打包后的 note-agent.exe" }
+  let ok = false
+  try {
+    // 已有的（比如 exe 挪过位置后失效的）直接覆盖
+    ok = shell.writeShortcutLink(link, "create", {
+      target: process.execPath,
+      cwd: path.dirname(process.execPath),
+      description: "知识库",
+      icon: process.execPath,
+      iconIndex: 0,
+      appUserModelId: "note-agent",
+    })
+  } catch (err) {
+    return { ok: false, path: link, error: err.message }
+  }
+  return ok ? { ok, path: link } : { ok, path: link, error: "系统没有创建成功" }
+}
+
+// 桌面上的快捷方式是否存在、是否指向当前这个 exe
+function shortcutStatus() {
+  const link = shortcutPath()
+  if (!fs.existsSync(link)) return "missing"
+  try {
+    return samePath(shell.readShortcutLink(link).target, process.execPath) ? "ok" : "stale"
+  } catch {
+    return "stale"
+  }
 }
 
 // 返回要打开的知识库；用户放弃时返回 null
@@ -150,10 +175,15 @@ async function ensureVault() {
     })
     if (response !== 0) return null
     if (checkboxChecked) {
-      try {
-        createDesktopShortcut()
-      } catch (err) {
-        console.error("创建快捷方式失败", err)
+      const result = createDesktopShortcut()
+      if (!result.ok) {
+        await message(null, {
+          type: "warning",
+          message: "没能在桌面创建快捷方式",
+          detail: `${result.error}
+
+可以稍后在「设置」页再试一次。`,
+        })
       }
     }
   }
@@ -466,6 +496,10 @@ async function fail(title, detail) {
 function fromApp(event) {
   return port !== null && event.senderFrame !== null && event.senderFrame.url.startsWith(`${appOrigin()}/`)
 }
+
+ipcMain.handle("shortcut:status", (event) => (fromApp(event) ? shortcutStatus() : null))
+
+ipcMain.handle("shortcut:create", (event) => (fromApp(event) ? createDesktopShortcut() : null))
 
 ipcMain.handle("vault:open", async (event) => {
   if (!fromApp(event) || !vaultPath) return
