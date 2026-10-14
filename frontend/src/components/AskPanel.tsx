@@ -34,7 +34,14 @@ function loadConversation(): Exchange[] {
   }
 }
 
-export function AskPanel({ onOpenNote }: { onOpenNote: (note: NoteRef) => void }) {
+export function AskPanel({
+  onOpenNote,
+  request,
+}: {
+  onOpenNote: (note: NoteRef) => void
+  // 从 Ctrl K 面板来的问题：id 变了就问一次
+  request?: { id: number; question: string } | null
+}) {
   const [question, setQuestion] = useState("")
   const [exchanges, setExchanges] = useState<Exchange[]>(loadConversation)
   const [busy, setBusy] = useState(false)
@@ -57,8 +64,8 @@ export function AskPanel({ onOpenNote }: { onOpenNote: (note: NoteRef) => void }
     }
   }, [exchanges])
 
-  async function send() {
-    const q = question.trim()
+  async function send(text = question) {
+    const q = text.trim()
     if (!q || busy) return
     const id = nextId.current++
     const mine = generation.current
@@ -67,7 +74,7 @@ export function AskPanel({ onOpenNote }: { onOpenNote: (note: NoteRef) => void }
       x.result ? [{ question: x.question, answer: x.result.answer }] : [],
     )
     setExchanges((prev) => [...prev, { id, question: q }])
-    setQuestion("")
+    if (text === question) setQuestion("")
     setBusy(true)
     const patch = await api
       .ask(q, history)
@@ -78,6 +85,15 @@ export function AskPanel({ onOpenNote }: { onOpenNote: (note: NoteRef) => void }
     }
     setBusy(false)
   }
+
+  const lastRequest = useRef(0)
+  useEffect(() => {
+    if (!request || request.id === lastRequest.current) return
+    lastRequest.current = request.id
+    void send(request.question)
+    // 只在来了新问题时触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request])
 
   function onSubmit(e: FormEvent) {
     e.preventDefault()

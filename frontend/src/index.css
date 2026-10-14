@@ -1,13 +1,16 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
+@import "@fontsource-variable/inter";
+/* 标题用思源宋体。字体按字符切成很多小文件，只下载页面上实际用到的那些 */
+@import "@fontsource/noto-serif-sc/600.css";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-    --font-heading: var(--font-sans);
-    --font-sans: 'Geist Variable', sans-serif;
+    --font-heading: "Noto Serif SC", "Source Han Serif SC", "Songti SC", serif;
+    --font-sans: "Inter Variable", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+    --color-pane: var(--pane);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -48,73 +51,77 @@
     --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* 雾蓝：冷白底色、灰蓝点缀。只有一个强调色（--primary），用在选中、链接和需要你处理的东西上 */
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
+    --background: #fcfdfe;
+    --foreground: #16202c;
+    --pane: #f7f9fb;
+    --card: #ffffff;
+    --card-foreground: #16202c;
+    --popover: #ffffff;
+    --popover-foreground: #16202c;
+    --primary: #3d5a8a;
+    --primary-foreground: #ffffff;
+    --secondary: #eef2f7;
+    --secondary-foreground: #16202c;
+    --muted: #edf1f6;
+    --muted-foreground: #5b6a7b;
+    --accent: #e7edf6;
+    --accent-foreground: #2c4370;
+    --destructive: #b4413a;
+    --border: #e3e8ee;
+    --input: #cfd7e1;
+    --ring: #3d5a8a;
+    --chart-1: #3d5a8a;
+    --chart-2: #3f7f74;
+    --chart-3: #7a5f97;
+    --chart-4: #a0664f;
+    --chart-5: #8a96a5;
     --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    --sidebar: #eef2f7;
+    --sidebar-foreground: #16202c;
+    --sidebar-primary: #3d5a8a;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #e4eaf2;
+    --sidebar-accent-foreground: #16202c;
+    --sidebar-border: #e3e8ee;
+    --sidebar-ring: #3d5a8a;
 }
 
+/* 夜里的雾蓝：系统是深色模式时自动切换（main.tsx 里加上 .dark） */
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    --background: #121820;
+    --foreground: #e6ebf2;
+    --pane: #151c25;
+    --card: #18202a;
+    --card-foreground: #e6ebf2;
+    --popover: #1b2430;
+    --popover-foreground: #e6ebf2;
+    --primary: #8fb0e0;
+    --primary-foreground: #0e141b;
+    --secondary: #1e2733;
+    --secondary-foreground: #e6ebf2;
+    --muted: #1e2733;
+    --muted-foreground: #93a1b3;
+    --accent: #1f2b3d;
+    --accent-foreground: #c5d6f0;
+    --destructive: #e07a72;
+    --border: #253040;
+    --input: #33415a;
+    --ring: #8fb0e0;
+    --chart-1: #8fb0e0;
+    --chart-2: #7fb8ab;
+    --chart-3: #b39ad1;
+    --chart-4: #d49a80;
+    --chart-5: #93a1b3;
+    --sidebar: #0e141b;
+    --sidebar-foreground: #e6ebf2;
+    --sidebar-primary: #8fb0e0;
+    --sidebar-primary-foreground: #0e141b;
+    --sidebar-accent: #1a2330;
+    --sidebar-accent-foreground: #e6ebf2;
+    --sidebar-border: #253040;
+    --sidebar-ring: #8fb0e0;
 }
 
 @layer base {
@@ -122,7 +129,7 @@
     @apply border-border outline-ring/50;
     }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
     }
   html {
     @apply font-sans;

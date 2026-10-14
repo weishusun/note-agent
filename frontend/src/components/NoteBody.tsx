@@ -25,6 +25,9 @@ const ASSET = /^!\[\[assets\/([^\]|]+)\]\]$/
 const HEADING = /^(#{1,6})\s+(.*)$/
 const LIST_ITEM = /^(\s*)([-*]|\d+[.)])\s+(.*)$/
 const TABLE_DIVIDER = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/
+const LINK_ONLY = /^\[\[[^\]]+\]\]$/
+const SUPPLEMENT = "模型补充"
+const SUPPLEMENT_MARKER = "以下内容由模型根据自身知识补充"
 const INLINE = /(!?\[\[[^\]]+\]\]|\*\*[^*]+\*\*|`[^`]+`|https?:\/\/[^\s<>"'，。；、）】]+)/
 
 function cells(line: string): string[] {
@@ -139,7 +142,7 @@ export function NoteBody({
             key={i}
             type="button"
             onClick={() => onOpenLink(target.trim())}
-            className="rounded text-primary underline decoration-muted-foreground/50 underline-offset-4 hover:decoration-primary"
+            className="rounded bg-accent px-1.5 text-accent-foreground transition-colors hover:bg-primary hover:text-primary-foreground"
           >
             {(label ?? target).trim()}
           </button>
@@ -158,95 +161,127 @@ export function NoteBody({
       return part
     })
 
-  return (
-    <div className="flex flex-col gap-3 text-sm leading-relaxed">
-      {parse(body).map((block, i) => {
-        switch (block.kind) {
-          case "heading":
-            return (
-              <h3
-                key={i}
-                className={
-                  block.level <= 2
-                    ? "mt-2 text-xs font-semibold tracking-wide text-muted-foreground first:mt-0"
-                    : "font-semibold"
-                }
-              >
-                {inline(block.text)}
-              </h3>
-            )
-          case "list":
-            return (
-              <ul key={i} className="flex flex-col gap-1">
-                {block.items.map((item, j) => (
-                  <li
-                    key={j}
-                    className="flex gap-2"
-                    style={{ paddingLeft: `${item.indent * 1.25}rem` }}
-                  >
-                    <span className="w-5 shrink-0 text-right text-muted-foreground tabular-nums">
-                      {item.marker}
-                    </span>
-                    <span className="min-w-0 flex-1">{inline(item.text)}</span>
-                  </li>
-                ))}
-              </ul>
-            )
-          case "table":
-            return (
-              <div key={i} className="overflow-x-auto rounded-lg border">
-                <table className="w-full border-collapse text-left text-sm">
-                  {block.header && (
-                    <thead className="bg-muted">
-                      <tr>
-                        {block.header.map((cell, j) => (
-                          <th key={j} className="border-b px-3 py-2 font-medium whitespace-nowrap">
-                            {inline(cell)}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                  )}
-                  <tbody>
-                    {block.rows.map((row, j) => (
-                      <tr key={j} className="border-b last:border-b-0">
-                        {row.map((cell, k) => (
-                          <td key={k} className="px-3 py-2 align-top">
-                            {inline(cell)}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          case "quote":
-            return (
-              <blockquote
-                key={i}
-                className="border-l-2 pl-3 whitespace-pre-wrap text-muted-foreground"
-              >
-                {block.lines.map((line, j) => (
-                  <span key={j} className="block min-h-[1em]">
-                    {inline(line)}
-                  </span>
-                ))}
-              </blockquote>
-            )
-          case "image":
-            return (
-              <img
-                key={i}
-                src={`/api/assets/${encodeURIComponent(block.name)}`}
-                alt="录入时的原始截图"
-                className="max-w-full rounded-md border"
-              />
-            )
-          case "paragraph":
-            return <p key={i}>{inline(block.lines.join("\n"))}</p>
+  const render = (block: Block, i: number): ReactNode => {
+    switch (block.kind) {
+      case "heading":
+        return (
+          <h3
+            key={i}
+            className={
+              block.level <= 2
+                ? "mt-5 text-[11px] font-medium tracking-[0.14em] text-muted-foreground/80 first:mt-0"
+                : "mt-2 font-semibold"
+            }
+          >
+            {inline(block.text)}
+          </h3>
+        )
+      case "list":
+        // 整个列表都是 [[双链]]（「概念」「关联」区块）：排成一行小标签
+        if (block.items.every((item) => LINK_ONLY.test(item.text.trim()))) {
+          return (
+            <div key={i} className="flex flex-wrap gap-2">
+              {block.items.map((item, j) => (
+                <span key={j} className="[&>button]:rounded-lg [&>button]:px-2.5 [&>button]:py-1 [&>span]:rounded-lg [&>span]:bg-muted [&>span]:px-2.5 [&>span]:py-1">
+                  {inline(item.text.trim())}
+                </span>
+              ))}
+            </div>
+          )
         }
-      })}
-    </div>
-  )
+        return (
+          <ul key={i} className="flex flex-col gap-1.5">
+            {block.items.map((item, j) => (
+              <li key={j} className="flex gap-3" style={{ paddingLeft: `${item.indent * 1.5}rem` }}>
+                <span className="w-6 shrink-0 pt-[3px] text-right text-xs text-muted-foreground/80 tabular-nums">
+                  {/^\d/.test(item.marker) && item.indent === 0
+                    ? item.marker.replace(".", "").padStart(2, "0")
+                    : item.marker}
+                </span>
+                <span className="min-w-0 flex-1">{inline(item.text)}</span>
+              </li>
+            ))}
+          </ul>
+        )
+      case "table":
+        return (
+          <div key={i} className="overflow-x-auto rounded-xl border">
+            <table className="w-full border-collapse text-left text-sm">
+              {block.header && (
+                <thead className="bg-pane">
+                  <tr>
+                    {block.header.map((cell, j) => (
+                      <th key={j} className="border-b px-3.5 py-2.5 font-medium whitespace-nowrap">
+                        {inline(cell)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+              )}
+              <tbody>
+                {block.rows.map((row, j) => (
+                  <tr key={j} className="border-b last:border-b-0">
+                    {row.map((cell, k) => (
+                      <td key={k} className="px-3.5 py-2.5 align-top">
+                        {inline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      case "quote":
+        return (
+          <blockquote key={i} className="border-l-2 border-input pl-3.5 whitespace-pre-wrap text-muted-foreground">
+            {block.lines.map((line, j) => (
+              <span key={j} className="block min-h-[1em]">
+                {inline(line)}
+              </span>
+            ))}
+          </blockquote>
+        )
+      case "image":
+        return (
+          <img
+            key={i}
+            src={`/api/assets/${encodeURIComponent(block.name)}`}
+            alt="录入时的原始截图"
+            className="max-w-full rounded-xl border"
+          />
+        )
+      case "paragraph":
+        return <p key={i}>{inline(block.lines.join("\n"))}</p>
+    }
+  }
+
+  // 「模型补充」区块单独装进一个带色的框：一眼和你自己的资料分开（SCHEMA 不变量 14）
+  const blocks = parse(body)
+  const out: ReactNode[] = []
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i]
+    if (block.kind === "heading" && block.level <= 2 && block.text.trim() === SUPPLEMENT) {
+      const inner: ReactNode[] = []
+      let j = i + 1
+      for (; j < blocks.length; j++) {
+        const next = blocks[j]
+        if (next.kind === "heading" && next.level <= 2) break
+        // 固定的那行说明已经写在框的标题里了
+        if (next.kind === "quote" && next.lines.join("").includes(SUPPLEMENT_MARKER)) continue
+        inner.push(render(next, j))
+      }
+      out.push(
+        <aside key={i} className="rounded-xl border border-primary/25 bg-accent/60 px-5 py-4 text-accent-foreground">
+          <div className="mb-2 text-[11px] tracking-[0.14em] opacity-80">模型补充 · 不是来自你的资料</div>
+          <div className="flex flex-col gap-2.5">{inner}</div>
+        </aside>,
+      )
+      i = j - 1
+    } else {
+      out.push(render(block, i))
+    }
+  }
+
+  return <div className="flex flex-col gap-3.5 text-[14.5px] leading-[1.8]">{out}</div>
 }

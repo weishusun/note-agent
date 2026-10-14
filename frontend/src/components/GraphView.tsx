@@ -261,8 +261,8 @@ function GraphCanvas({
   const legend = [...layout.colors.entries()]
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="relative h-[68vh] min-h-96 overflow-hidden rounded-lg border bg-card">
+    <div className="flex h-full flex-col gap-2">
+      <div className="relative min-h-96 flex-1 overflow-hidden rounded-xl border bg-card shadow-[0_1px_2px_rgba(16,32,44,0.04)]">
         <svg
           ref={svg}
           role="img"
