@@ -10,9 +10,10 @@ from pathlib import Path, PurePath
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
+from app import settings as app_settings
 from app.ask.answer import AskResult, answer_question
 from app.ask.expand import Turn
 from app.config import default_vault_root
@@ -134,7 +135,8 @@ def _split_refs(refs: list[NoteRef]) -> dict[str, list[NoteRef]]:
     }
 
 
-def create_app(vault_root: Path | None = None) -> FastAPI:
+def create_app(vault_root: Path | None = None, static_dir: Path | None = None) -> FastAPI:
+    """static_dir 给了就连界面一起提供（桌面版）；浏览器开发时界面由 Vite 提供，不用给。"""
     root = Path(vault_root) if vault_root is not None else default_vault_root()
     store = VaultStore(root)
     taxonomy = TaxonomyManager(root / "taxonomy.yaml")
@@ -331,6 +333,11 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
         vectors.request_sync()
         return vectors.status()
 
+    @app.get("/api/locations")
+    def api_locations() -> dict[str, str]:
+        # 设置页显示用：知识库在哪、设置（含密钥）存在哪
+        return {"vault": str(root.resolve()), "settings": str(app_settings.settings_path())}
+
     @app.post("/api/reindex")
     def api_reindex() -> dict[str, int]:
         return {"indexed": index.rebuild_all()}
@@ -364,7 +371,28 @@ def create_app(vault_root: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="非法路径")
         return {"frontmatter": note.frontmatter, "body": note.body}
 
+    if static_dir is not None:
+        # 放在最后：兜底路由不能挡在接口前面
+        _serve_frontend(app, static_dir)
     return app
+
+
+def _serve_frontend(app: FastAPI, static_dir: Path) -> None:
+    """界面的构建产物和接口同源提供。找不到的路径一律回 index.html。"""
+    root = Path(static_dir).resolve()
+    index_html = root / "index.html"
+    if not index_html.is_file():
+        raise RuntimeError(f"找不到界面文件: {index_html}")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def frontend(path: str) -> FileResponse:
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="接口不存在")
+        target = (root / path).resolve()
+        if path and target.is_relative_to(root) and target.is_file():
+            return FileResponse(target)
+        # 重新打包后要拿到新的 index.html，它引用的文件名带哈希，可以放心缓存
+        return FileResponse(index_html, headers={"Cache-Control": "no-cache"})
 
 
 app = create_app()

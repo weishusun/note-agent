@@ -10,6 +10,7 @@
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,8 +20,10 @@ _THIS = Path(__file__).resolve()
 _PROJECT_ROOT = _THIS.parents[2]
 ENV_PATH = _PROJECT_ROOT / ".env"
 
-# .env 不存在时 load_dotenv 静默返回 False,不报错(CI / 测试环境无 .env 是正常的)
-load_dotenv(ENV_PATH)
+# .env 不存在时 load_dotenv 静默返回 False,不报错(CI / 测试环境无 .env 是正常的)。
+# 打包成桌面版后不认 .env:设置只来自外壳指定的 settings.json
+if not getattr(sys, "frozen", False):
+    load_dotenv(ENV_PATH)
 
 ZHIPU_API_KEY: str | None = os.environ.get("ZHIPU_API_KEY")
 GLM_BASE_URL: str = os.environ.get("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")

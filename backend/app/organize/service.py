@@ -275,5 +275,5 @@ class Organizer:
         # 提交失败（如 vault 不是 git 仓库）只记日志：该改的已经改完了
         try:
             git.commit(self.store.root, message)
-        except (subprocess.CalledProcessError, OSError) as exc:
+        except (subprocess.SubprocessError, OSError) as exc:
             logger.warning("vault git 提交失败: %s", exc)

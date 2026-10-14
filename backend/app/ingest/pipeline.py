@@ -120,7 +120,7 @@ def run_ingest(
     # 笔记已落盘，提交失败（如 vault 不是 git 仓库）不应让整次录入算失败
     try:
         git.commit(store.root, f"note: 新建 {len(ids)} 条 (来源 {kind})")
-    except (subprocess.CalledProcessError, OSError) as exc:
+    except (subprocess.SubprocessError, OSError) as exc:
         logger.warning("vault git 提交失败，笔记已写入但未提交: %s", exc)
     logger.info(
         "录入完成: %d 条, 拆分 %.1fs, 分类 %.1fs, 写入 %.1fs",

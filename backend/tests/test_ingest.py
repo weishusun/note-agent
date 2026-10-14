@@ -311,8 +311,17 @@ def test_extract_failure_marks_job_failed_and_is_not_logged(
     assert retry["status"] == "done" and retry["duplicate"] is False
 
 
-def test_git_commit_failure_does_not_fail_job(client: TestClient, stubs: Stubs) -> None:
-    stubs.commit_error = subprocess.CalledProcessError(128, ["git", "add", "-A"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.CalledProcessError(128, ["git", "add", "-A"]),
+        subprocess.TimeoutExpired(["git", "add", "-A"], 120),
+    ],
+)
+def test_git_commit_failure_does_not_fail_job(
+    client: TestClient, stubs: Stubs, error: Exception
+) -> None:
+    stubs.commit_error = error
     job = _ingest(client, kind="text", text="vault 不是 git 仓库")
     assert job["status"] == "done"
     assert len(job["created"]) == 2
