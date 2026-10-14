@@ -1,0 +1,16 @@
+{
+  "name": "note-agent-desktop",
+  "productName": "知识库",
+  "version": "0.6.0",
+  "private": true,
+  "description": "note-agent 的桌面外壳：一个窗口装界面，后端随窗口启动和退出",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^44.7.2"
+  }
+}

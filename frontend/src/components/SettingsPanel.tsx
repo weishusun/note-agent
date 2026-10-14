@@ -1,15 +1,17 @@
 import { useEffect, useId, useState, type FormEvent, type ReactNode } from "react"
-import { CheckIcon, XIcon } from "lucide-react"
+import { CheckIcon, FolderOpenIcon, XIcon } from "lucide-react"
 
 import { Alert } from "@/components/Alert"
 import { Button } from "@/components/ui/button"
 import {
   api,
+  type Locations,
   type ProbeResult,
   type SettingsUpdate,
   type SettingsView,
   type VectorStatus,
 } from "@/lib/api"
+import { desktop } from "@/lib/desktop"
 
 type Form = Omit<SettingsView, "api_key_set" | "api_key_hint"> & { api_key: string }
 
@@ -41,6 +43,7 @@ export function SettingsPanel({ active }: { active: boolean }) {
     embedding?: ProbeResult
   } | null>(null)
   const [vectors, setVectors] = useState<VectorStatus | null>(null)
+  const [locations, setLocations] = useState<Locations | null>(null)
   // 每保存一次递增：让向量索引的进度重新开始轮询
   const [vectorsKey, setVectorsKey] = useState(0)
 
@@ -68,6 +71,11 @@ export function SettingsPanel({ active }: { active: boolean }) {
       clearTimeout(timer)
     }
   }, [active, vectorsKey])
+
+  useEffect(() => {
+    if (!active || locations) return
+    api.locations().then(setLocations, () => undefined)
+  }, [active, locations])
 
   useEffect(() => {
     if (!active || saved) return
@@ -140,131 +148,176 @@ export function SettingsPanel({ active }: { active: boolean }) {
     : "尚未设置"
 
   return (
-    <form onSubmit={onSave} className="flex flex-col gap-5">
-      <p className="text-sm text-muted-foreground">
-        可以换成任何兼容 OpenAI 接口的服务商。设置保存在本机的{" "}
-        <code className="rounded bg-muted px-1 font-mono text-xs">note-agent/settings.json</code>
-        ，不会提交到 git；密钥保存后不再显示。
-      </p>
-
-      <Field label="接口地址">
-        {(id) => (
-          <input
-            id={id}
-            className={INPUT}
-            value={form.base_url}
-            onChange={(e) => set("base_url", e.target.value)}
-            placeholder="https://open.bigmodel.cn/api/paas/v4/"
-          />
-        )}
-      </Field>
-      <Field label="API Key">
-        {(id) => (
-          <input
-            id={id}
-            type="password"
-            autoComplete="off"
-            className={INPUT}
-            value={form.api_key}
-            onChange={(e) => set("api_key", e.target.value)}
-            placeholder={keyPlaceholder}
-          />
-        )}
-      </Field>
-      <Field label="提取模型" hint="负责看截图，必须支持图片输入。">
-        {(id) => (
-          <input
-            id={id}
-            className={INPUT}
-            value={form.extract_model}
-            onChange={(e) => set("extract_model", e.target.value)}
-          />
-        )}
-      </Field>
-      <Field label="分类模型" hint="也用于压缩超长文本和扩展检索词，选便宜快速的即可。">
-        {(id) => (
-          <input
-            id={id}
-            className={INPUT}
-            value={form.classify_model}
-            onChange={(e) => set("classify_model", e.target.value)}
-          />
-        )}
-      </Field>
-      <Field label="问答模型" hint="留空则使用分类模型。">
-        {(id) => (
-          <input
-            id={id}
-            className={INPUT}
-            value={form.answer_model}
-            onChange={(e) => set("answer_model", e.target.value)}
-            placeholder={form.classify_model}
-          />
-        )}
-      </Field>
-
-      <Field
-        label="向量模型"
-        hint="用于向量检索：提问时换个说法也能搜到，录入时能发现名字不同但内容相近的重复笔记。留空则只做字面检索。模型名见服务商的文档（README 里有智谱的）。"
-      >
-        {(id) => (
-          <input
-            id={id}
-            className={INPUT}
-            value={form.embed_model}
-            onChange={(e) => set("embed_model", e.target.value)}
-            placeholder="未设置"
-          />
-        )}
-      </Field>
-      {vectors?.enabled && (
-        <p role="status" className="-mt-3 text-xs text-muted-foreground">
-          向量索引：{vectors.total} 条笔记里已有 {vectors.embedded} 条算好了向量
-          {vectors.embedded < vectors.total ? "，其余的正在后台计算…" : "。"}
+    <div className="flex flex-col gap-8">
+      {locations && <VaultLocation path={locations.vault} />}
+      <form onSubmit={onSave} className="flex flex-col gap-5">
+        <h2 className="font-heading text-lg">模型接口</h2>
+        <p className="-mt-3 text-sm text-muted-foreground">
+          可以换成任何兼容 OpenAI 接口的服务商。设置保存在本机的{" "}
+          <code className="rounded bg-muted px-1 font-mono text-xs break-all">
+            {locations?.settings ?? "settings.json"}
+          </code>
+          ，不在知识库里，也不会提交到 git；密钥保存后不再显示。
         </p>
-      )}
 
-      <fieldset className="flex flex-col gap-3 rounded-lg border p-3">
-        <legend className="px-1 text-xs text-muted-foreground">高级</legend>
-        <Check
-          label="分类等小调用关闭思考模式"
-          hint="智谱专有参数，关闭后每次不到 1 秒。换成不认这个参数的服务商时取消勾选。"
-          checked={form.disable_thinking}
-          onChange={(v) => set("disable_thinking", v)}
-        />
-        <Check
-          label="看图提取时关闭思考模式"
-          hint="默认勾选。取消后模型会先思考再输出，一张截图要 100 秒以上，实测内容并没有更完整。"
-          checked={form.extract_disable_thinking}
-          onChange={(v) => set("extract_disable_thinking", v)}
-        />
-      </fieldset>
+        <Field label="接口地址">
+          {(id) => (
+            <input
+              id={id}
+              className={INPUT}
+              value={form.base_url}
+              onChange={(e) => set("base_url", e.target.value)}
+              placeholder="https://open.bigmodel.cn/api/paas/v4/"
+            />
+          )}
+        </Field>
+        <Field label="API Key">
+          {(id) => (
+            <input
+              id={id}
+              type="password"
+              autoComplete="off"
+              className={INPUT}
+              value={form.api_key}
+              onChange={(e) => set("api_key", e.target.value)}
+              placeholder={keyPlaceholder}
+            />
+          )}
+        </Field>
+        <Field label="提取模型" hint="负责看截图，必须支持图片输入。">
+          {(id) => (
+            <input
+              id={id}
+              className={INPUT}
+              value={form.extract_model}
+              onChange={(e) => set("extract_model", e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="分类模型" hint="也用于压缩超长文本和扩展检索词，选便宜快速的即可。">
+          {(id) => (
+            <input
+              id={id}
+              className={INPUT}
+              value={form.classify_model}
+              onChange={(e) => set("classify_model", e.target.value)}
+            />
+          )}
+        </Field>
+        <Field label="问答模型" hint="留空则使用分类模型。">
+          {(id) => (
+            <input
+              id={id}
+              className={INPUT}
+              value={form.answer_model}
+              onChange={(e) => set("answer_model", e.target.value)}
+              placeholder={form.classify_model}
+            />
+          )}
+        </Field>
 
-      <div className="flex items-center gap-3">
-        <Button type="submit" size="lg" disabled={busy !== null}>
-          {busy === "save" ? "保存中…" : "保存"}
-        </Button>
-        <Button type="button" variant="outline" size="lg" disabled={busy !== null} onClick={onTest}>
-          {busy === "test" ? "测试中…" : "保存并测试连接"}
-        </Button>
-        {notice && (
-          <span role="status" className="text-sm text-muted-foreground">
-            {notice}
-          </span>
+        <Field
+          label="向量模型"
+          hint="用于向量检索：提问时换个说法也能搜到，录入时能发现名字不同但内容相近的重复笔记。留空则只做字面检索。模型名见服务商的文档（README 里有智谱的）。"
+        >
+          {(id) => (
+            <input
+              id={id}
+              className={INPUT}
+              value={form.embed_model}
+              onChange={(e) => set("embed_model", e.target.value)}
+              placeholder="未设置"
+            />
+          )}
+        </Field>
+        {vectors?.enabled && (
+          <p role="status" className="-mt-3 text-xs text-muted-foreground">
+            向量索引：{vectors.total} 条笔记里已有 {vectors.embedded} 条算好了向量
+            {vectors.embedded < vectors.total ? "，其余的正在后台计算…" : "。"}
+          </p>
+        )}
+
+        <fieldset className="flex flex-col gap-3 rounded-lg border p-3">
+          <legend className="px-1 text-xs text-muted-foreground">高级</legend>
+          <Check
+            label="分类等小调用关闭思考模式"
+            hint="智谱专有参数，关闭后每次不到 1 秒。换成不认这个参数的服务商时取消勾选。"
+            checked={form.disable_thinking}
+            onChange={(v) => set("disable_thinking", v)}
+          />
+          <Check
+            label="看图提取时关闭思考模式"
+            hint="默认勾选。取消后模型会先思考再输出，一张截图要 100 秒以上，实测内容并没有更完整。"
+            checked={form.extract_disable_thinking}
+            onChange={(v) => set("extract_disable_thinking", v)}
+          />
+        </fieldset>
+
+        <div className="flex items-center gap-3">
+          <Button type="submit" size="lg" disabled={busy !== null}>
+            {busy === "save" ? "保存中…" : "保存"}
+          </Button>
+          <Button type="button" variant="outline" size="lg" disabled={busy !== null} onClick={onTest}>
+            {busy === "test" ? "测试中…" : "保存并测试连接"}
+          </Button>
+          {notice && (
+            <span role="status" className="text-sm text-muted-foreground">
+              {notice}
+            </span>
+          )}
+        </div>
+
+        {error && <Alert tone="error">{error}</Alert>}
+        {probes && (
+          <ul className="flex flex-col gap-2" aria-label="连接测试结果">
+            <Probe name="分类模型（文本）" result={probes.text} />
+            <Probe name="提取模型（看图）" result={probes.vision} />
+            {probes.embedding && (
+              <Probe name="向量模型" result={probes.embedding} detailLabel="向量维度" />
+            )}
+          </ul>
+        )}
+      </form>
+    </div>
+  )
+}
+
+function VaultLocation({ path }: { path: string }) {
+  const [busy, setBusy] = useState(false)
+  async function change() {
+    if (!desktop) return
+    setBusy(true)
+    // 换成功时应用会重新打开，这里就不用再管了
+    await desktop.chooseVault().catch(() => false)
+    setBusy(false)
+  }
+  return (
+    <section className="flex flex-col gap-2" aria-labelledby="vault-location">
+      <h2 id="vault-location" className="font-heading text-lg">
+        知识库位置
+      </h2>
+      <div className="flex flex-wrap items-center gap-2">
+        <code className="min-w-0 flex-1 rounded-lg border bg-muted/50 px-3 py-2 font-mono text-xs break-all">
+          {path}
+        </code>
+        {desktop && (
+          <>
+            <Button type="button" variant="outline" onClick={() => desktop?.openVault()}>
+              <FolderOpenIcon />
+              打开文件夹
+            </Button>
+            <Button type="button" variant="outline" disabled={busy} onClick={change}>
+              {busy ? "选择中…" : "更换…"}
+            </Button>
+          </>
         )}
       </div>
-
-      {error && <Alert tone="error">{error}</Alert>}
-      {probes && (
-        <ul className="flex flex-col gap-2" aria-label="连接测试结果">
-          <Probe name="分类模型（文本）" result={probes.text} />
-          <Probe name="提取模型（看图）" result={probes.vision} />
-          {probes.embedding && (
-            <Probe name="向量模型" result={probes.embedding} detailLabel="向量维度" />
-          )}
-        </ul>
-      )}
-    </form>
+      <p className="text-xs text-muted-foreground">
+        {desktop
+          ? "笔记都是这个文件夹里的 Markdown 文件。更换后应用会重新打开，原来的知识库不会被改动。"
+          : "浏览器开发模式下默认是 note-agent 旁边的 vault 文件夹，可以用环境变量 VAULT_PATH 改。"}
+      </p>
+    </section>
   )
 }
 

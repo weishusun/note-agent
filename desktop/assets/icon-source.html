@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- 应用图标的原稿。用 Edge 无头模式截成 1024×1024 的透明 PNG，再缩成 icon.ico / icon.png：
+     msedge --headless --screenshot=icon-1024.png --window-size=1024,1024 --default-background-color=00000000 file:///…/icon-source.html -->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="../../frontend/node_modules/@fontsource/noto-serif-sc/600.css" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1024px;
+        height: 1024px;
+        background: transparent;
+      }
+      .mark {
+        position: absolute;
+        inset: 48px;
+        display: grid;
+        place-items: center;
+        border-radius: 216px;
+        background: linear-gradient(160deg, #4a6a9e 0%, #3d5a8a 55%, #334d78 100%);
+        color: #ffffff;
+        font-family: "Noto Serif SC", serif;
+        font-weight: 600;
+        font-size: 600px;
+        line-height: 1;
+      }
+      .mark span {
+        transform: translateY(-14px);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="mark"><span>知</span></div>
+  </body>
+</html>

@@ -134,4 +134,9 @@
   html {
     @apply font-sans;
     }
+  /* Windows 默认的滚动条又宽又带箭头，换成细的、跟随配色的 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 35%, transparent) transparent;
+    }
 }

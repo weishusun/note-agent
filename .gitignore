@@ -16,3 +16,7 @@ dist/
 
 # Logs
 *.log
+
+# 桌面版打包产物
+/backend/build/
+/desktop/release/

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'" />
+    <title>知识库</title>
+    <style>
+      :root {
+        --bg: #fcfdfe;
+        --fg: #16202c;
+        --muted: #5b6a7b;
+        --mark: #3d5a8a;
+        --mark-fg: #ffffff;
+        --track: #e3e8ee;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121820;
+          --fg: #e6ebf2;
+          --muted: #8b98a8;
+          --mark: #8fb0e0;
+          --mark-fg: #121820;
+          --track: #263140;
+        }
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        user-select: none;
+      }
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 64px;
+        height: 64px;
+        border-radius: 16px;
+        background: var(--mark);
+        color: var(--mark-fg);
+        font-family: "Noto Serif SC", "SimSun", serif;
+        font-size: 36px;
+        font-weight: 600;
+      }
+      .text {
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .bar {
+        position: relative;
+        width: 160px;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 3px;
+        background: var(--track);
+      }
+      .bar::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        width: 40%;
+        border-radius: 3px;
+        background: var(--mark);
+        animation: slide 1.2s ease-in-out infinite;
+      }
+      @keyframes slide {
+        from {
+          transform: translateX(-100%);
+        }
+        to {
+          transform: translateX(250%);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="mark">知</div>
+    <div class="text">正在打开知识库…</div>
+    <div class="bar"></div>
+  </body>
+</html>

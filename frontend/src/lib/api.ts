@@ -109,6 +109,12 @@ export interface Graph {
   edges: { source: string; target: string }[]
 }
 
+// 知识库文件夹和设置文件（含密钥）在本机的位置
+export interface Locations {
+  vault: string
+  settings: string
+}
+
 export interface SettingsView {
   base_url: string
   api_key_set: boolean
@@ -276,6 +282,7 @@ export const api = {
     request<Tree>(`/api/categories?${query({ path })}`, { method: "DELETE" }),
   reclassify: (scope: "unsorted" | "all") => post<{ job_id: string }>("/api/reclassify", { scope }),
 
+  locations: () => request<Locations>("/api/locations"),
   settings: () => request<SettingsView>("/api/settings"),
   saveSettings: (update: SettingsUpdate) => send<SettingsView>("PUT", "/api/settings", update),
   // 没填向量模型时结果里没有 embedding
