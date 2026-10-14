@@ -18,6 +18,7 @@ from app.search.query import (
     search,
     status_counts,
 )
+from app.vault.models import NoteRef
 from app.vault.store import VaultStore
 from tests.conftest import make_note
 
@@ -397,3 +398,16 @@ def test_remove_note(store: VaultStore, index: SearchIndex) -> None:
     assert note.path is not None
     index.remove_note(note.path.as_posix())
     assert search(index, "检索增强") == []
+
+
+def test_note_ref_carries_the_screenshot_path(store: VaultStore, index: SearchIndex) -> None:
+    """来自截图的笔记带着截图路径（界面用它显示缩略图）；别的来源为 None。"""
+    shot = make_note(title="训练流程", kind="screenshot")
+    shot.frontmatter.source.ref = "assets/2026-10-13-091500.png"
+    text = make_note(title="手写的")
+    for note in (shot, text):
+        store.create_note(note)
+        index.upsert_note(note)
+    refs = {ref.title: ref.image for ref in all_refs(index)}
+    assert refs == {"训练流程": "assets/2026-10-13-091500.png", "手写的": None}
+    assert NoteRef.from_note(shot).image == "assets/2026-10-13-091500.png"

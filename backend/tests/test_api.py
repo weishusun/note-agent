@@ -52,6 +52,7 @@ def test_get_search(client: TestClient) -> None:
         "category",
         "category_locked",
         "duplicate_of",
+        "image",
         "tags",
         "summary",
         "status",

@@ -4,7 +4,9 @@
 > 实现与本文件冲突时,改实现,不改本文件。
 > 确需改本文件时,必须同一次 commit 内同步修改 `backend/app/vault/models.py`。
 
-**版本:v8**
+**版本:v9**
+v8 → v9 变更(界面改版,列表里显示截图缩略图):`NoteRef` 新增 `image`,索引的 `notes` 表新增 `image` 列(§4、§5)。
+
 v7 → v8 变更(REQUIREMENTS 第 5 步「多轮追问和向量检索」):索引新增 `embeddings` 表,每条笔记一个向量(§4);
 `POST /api/ask` 的检索改为**字面 + 向量混合**(§5);设置新增 `embed_model`,连接测试多了向量模型一项;
 新增 `GET /api/vectors`、`POST /api/vectors/sync`(§5)。向量模型没配置时一切照旧,只做字面检索。
@@ -459,6 +461,7 @@ CREATE TABLE notes (
   status            TEXT NOT NULL,
   confidence        REAL NOT NULL,
   duplicate_of      TEXT,               -- 疑似与之重复的笔记 id，可空
+  image             TEXT,               -- 来自截图时那张截图的路径（assets/…），可空
   content_hash      TEXT NOT NULL,
   updated           TEXT NOT NULL
 );
@@ -504,7 +507,7 @@ CREATE TABLE embeddings (
 - 向量归一化后存成 float32,检索时在内存里逐条算点积(一两千条、两千维约 0.1 秒),不引入向量数据库。
 - 它也是派生物,但**重算要调用接口**,所以表结构升级时不跟着丢;换了向量模型时旧模型算的向量不参与检索,后台全部重算。
 
-**表结构版本:**用 `PRAGMA user_version` 记录(与本文件的版本号一致,v8 = 8)。打开时版本不符就丢弃并重建 `notes`、`notes_fts`、`links` 三张表,
+**表结构版本:**用 `PRAGMA user_version` 记录(与本文件的版本号一致,v9 = 9)。打开时版本不符就丢弃并重建 `notes`、`notes_fts`、`links` 三张表,
 随后由启动时的全量重建补回数据。`ingest_log` **不随之丢弃**——它不是从笔记文件派生的,丢了就失去重复录入的检测。`embeddings` 也不丢,理由见上。
 
 ---
@@ -873,6 +876,7 @@ CREATE TABLE embeddings (
   "summary": "三个角动量分量互不对易……",
   "status": "active",
   "duplicate_of": null,                 // 疑似与之重复的笔记 id
+  "image": "assets/2026-10-13-091500.png",   // source.kind=screenshot 时那张截图的路径，其余为 null。界面用它显示缩略图
   "updated": "2026-07-30T14:22:11+08:00",
   "confidence": 0.88
 }

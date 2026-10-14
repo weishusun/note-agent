@@ -344,6 +344,15 @@ function NoteListItem({
         )}
       >
         {selected && <span className="absolute top-3 bottom-3 left-0 w-0.5 rounded-full bg-primary" />}
+        {/* 主题笔记用它的截图当封面；同一张截图拆出来的概念笔记不重复显示 */}
+        {note.type === "topic" && note.image && (
+          <img
+            src={`/api/assets/${encodeURIComponent(note.image.replace(/^assets\//, ""))}`}
+            alt=""
+            loading="lazy"
+            className="size-[52px] flex-none rounded-lg border bg-muted object-cover object-top"
+          />
+        )}
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold">{note.title}</span>
           <span className="mt-0.5 line-clamp-2 text-[12.5px] leading-relaxed text-muted-foreground">

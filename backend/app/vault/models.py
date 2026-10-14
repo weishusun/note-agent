@@ -102,6 +102,11 @@ class Note(BaseModel):
     path: Path | None = None
 
 
+def screenshot_of(fm: "NoteFrontmatter") -> str | None:
+    """笔记来自截图时，那张截图的路径。"""
+    return fm.source.ref if fm.source.kind == "screenshot" and fm.source.ref else None
+
+
 class NoteRef(BaseModel):
     # null 表示手工放进 vault、无 id 的笔记（SCHEMA 第 5 节）
     id: str | None
@@ -116,6 +121,8 @@ class NoteRef(BaseModel):
     duplicate_of: str | None
     updated: datetime
     confidence: float
+    # 来自截图时，那张截图在 vault 里的路径（assets/…）；其余为 None。界面用它显示缩略图
+    image: str | None = None
 
     @classmethod
     def from_note(cls, note: Note) -> "NoteRef":
@@ -135,6 +142,7 @@ class NoteRef(BaseModel):
             duplicate_of=fm.duplicate_of,
             updated=fm.updated,
             confidence=fm.confidence,
+            image=screenshot_of(fm),
         )
 
 

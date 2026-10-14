@@ -21,7 +21,7 @@ _RANK_BROWSE = 3
 
 _ROW_COLUMNS = (
     "path, id, type, title, category, category_locked, tags, aliases, summary, status,"
-    " confidence, duplicate_of, updated"
+    " confidence, duplicate_of, image, updated"
 )
 
 
@@ -360,6 +360,7 @@ def _to_ref(row: dict) -> NoteRef:
         duplicate_of=row["duplicate_of"],
         updated=row["updated"],
         confidence=row["confidence"],
+        image=row["image"],
     )
 
 

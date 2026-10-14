@@ -16,6 +16,8 @@ export interface NoteRef {
   duplicate_of: string | null
   updated: string
   confidence: number
+  // 来自截图时那张截图的路径（assets/…），用来显示缩略图
+  image: string | null
 }
 
 // 录入任务依次经过的四个阶段（重新归类的任务阶段是「归类」，不在此列）

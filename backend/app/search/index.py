@@ -15,7 +15,7 @@ from typing import Iterator
 
 import yaml
 
-from app.vault.models import Note
+from app.vault.models import Note, screenshot_of
 from app.vault.store import VaultStore
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ CREATE TABLE notes (
   status            TEXT NOT NULL,
   confidence        REAL NOT NULL,
   duplicate_of      TEXT,               -- 疑似与之重复的笔记 id，可空
+  image             TEXT,               -- 来自截图时那张截图的路径（assets/…），可空
   content_hash      TEXT NOT NULL,
   updated           TEXT NOT NULL
 );
@@ -71,7 +72,7 @@ CREATE TABLE embeddings (
 _SCHEMA_SQL = _NOTES_SQL + _INGEST_LOG_SQL + _FTS_SQL + _LINKS_SQL + _EMBEDDINGS_SQL
 
 # 记在 PRAGMA user_version 里，与 SCHEMA.md 的版本号一致
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # fts 表里 aliases 的存储分隔符，查询层按它还原成列表做精确匹配
 ALIAS_SEP = "\n"
@@ -173,8 +174,8 @@ class SearchIndex:
         conn.execute(
             "INSERT INTO notes"
             " (path, id, type, title, category, category_locked, tags, aliases, summary, status,"
-            "  confidence, duplicate_of, content_hash, updated)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  confidence, duplicate_of, image, content_hash, updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 path,
                 fm.id,
@@ -188,6 +189,7 @@ class SearchIndex:
                 fm.status,
                 fm.confidence,
                 fm.duplicate_of,
+                screenshot_of(fm),
                 content_hash(note),
                 fm.updated.isoformat(),
             ),
