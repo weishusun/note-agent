@@ -20,6 +20,7 @@ const KIND_LABEL: Record<string, string> = {
   text: "文本",
   file: "文件",
   url: "网页",
+  supplement: "自动",
 }
 
 // 录入队列：排队中、处理中、处理完的任务，最近提交的在前
@@ -111,8 +112,9 @@ function JobRow({
   const notes = [...job.created, ...job.inbox]
   const suspected = notes.flatMap((n) => (n.duplicate_of && n.id ? [n.id] : []))
   const expandable = job.status === "done" && notes.length > 0
-  // 处理完之后用主题笔记的标题当名字，比「截图」好认
-  const title = job.status === "done" && notes.length > 0 ? notes[0].title : job.label
+  // 处理完之后用主题笔记的标题当名字，比「截图」好认；模型补充任务一直用「模型补充 · …」
+  const title =
+    job.status === "done" && notes.length > 0 && job.kind !== "supplement" ? notes[0].title : job.label
   const meta = [KIND_LABEL[job.kind] ?? job.kind, job.created_at.slice(11, 16)].join(" · ")
 
   return (
@@ -142,7 +144,7 @@ function JobRow({
             <span className="text-xs text-destructive">{job.error ?? "处理失败"}</span>
           )}
         </button>
-        {job.status === "running" && <StageProgress stage={job.stage} />}
+        {job.status === "running" && job.kind !== "supplement" && <StageProgress stage={job.stage} />}
         {job.status === "pending" && (
           <Button size="sm" variant="ghost" onClick={onRemove}>
             取消
@@ -206,6 +208,9 @@ function StatusText({
   suspected: number
 }) {
   if (job.status === "pending") return <>排队中</>
+  if (job.status === "running" && job.kind === "supplement") {
+    return <>正在写{job.progress ? ` · 写好 ${job.progress.done}/${job.progress.total} 条` : ""}</>
+  }
   if (job.status === "running") {
     // 长资料是分段整理的：显示整理到第几段了
     return (
@@ -220,6 +225,7 @@ function StatusText({
   if (job.status === "failed") return <>失败</>
   if (count === 0) return <>笔记已经不在了</>
   if (job.duplicate) return <>之前录入过，这是当时的 {count} 条笔记</>
+  if (job.kind === "supplement") return <>{count} 条笔记写好了模型补充</>
   return (
     <>
       {count} 条笔记

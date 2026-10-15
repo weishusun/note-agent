@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { FolderInputIcon, LockIcon, PencilLineIcon, Trash2Icon, XIcon } from "lucide-react"
+import { FolderInputIcon, LockIcon, PencilLineIcon, SparklesIcon, Trash2Icon, XIcon } from "lucide-react"
 
 import { Alert } from "@/components/Alert"
 import { CategoryPicker } from "@/components/CategoryPicker"
@@ -53,6 +53,7 @@ export function NoteReader({
   }, [mode, onEditingChange])
   const [tree, setTree] = useState<Tree | null>(null)
   const [busy, setBusy] = useState(false)
+  const [supplementing, setSupplementing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -134,6 +135,14 @@ export function NoteReader({
   }
 
   const save = (values: NoteFormValues) => noteId && void apply(() => api.editNote(noteId, values))
+  // 模型补充：让模型（重新）写一段，整段换掉原来的
+  async function supplement() {
+    if (!noteId) return
+    setSupplementing(true)
+    await apply(() => api.supplementNote(noteId))
+    setSupplementing(false)
+  }
+  const hasSupplement = current !== null && /^## 模型补充\s*$/m.test(current.detail.body)
   const move = (category: string) => noteId && void apply(() => api.moveNote(noteId, category))
 
   return (
@@ -146,6 +155,13 @@ export function NoteReader({
           <>
             <ToolButton label="编辑" onClick={() => enter("edit")} disabled={busy}>
               <PencilLineIcon />
+            </ToolButton>
+            <ToolButton
+              label={hasSupplement ? "重新写模型补充" : "让模型补充"}
+              onClick={() => void supplement()}
+              disabled={busy}
+            >
+              <SparklesIcon />
             </ToolButton>
             <ToolButton label="改分类" onClick={() => enter("category")} disabled={busy}>
               <FolderInputIcon />
@@ -265,6 +281,11 @@ export function NoteReader({
                 <Button size="sm" variant="ghost" disabled={busy} onClick={() => enter("view")}>
                   取消
                 </Button>
+              </Alert>
+            )}
+            {supplementing && (
+              <Alert tone="info">
+                正在让模型{hasSupplement ? "重新" : ""}写补充，大约要 10–30 秒。写好后会整段换掉原来的模型补充。
               </Alert>
             )}
             {error && <Alert tone="error">{error}</Alert>}

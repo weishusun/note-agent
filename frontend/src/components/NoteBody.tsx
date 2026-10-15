@@ -1,7 +1,7 @@
 import type { ReactNode } from "react"
 
 // 笔记正文的轻量渲染：覆盖录入时会生成的写法（SCHEMA 2.3）——
-// 标题、有序/无序/嵌套列表、表格、引用块、![[截图]]、![[原文件]]、[[双链]]、**加粗**、`代码`、网址。其余按普通段落显示。
+// 标题、有序/无序/嵌套列表、表格、引用块、代码块、![[截图]]、![[原文件]]、[[双链]]、**加粗**、`代码`、网址。其余按普通段落显示。
 
 interface ListItem {
   // 缩进层级：每两个空格算一层
@@ -17,6 +17,7 @@ type Block =
   | { kind: "table"; header: string[] | null; rows: string[][] }
   | { kind: "quote"; lines: string[] }
   | { kind: "image"; name: string }
+  | { kind: "code"; text: string }
   | { kind: "paragraph"; lines: string[] }
 
 // 单独成行、且是图片的素材才显示成图；别的素材（PDF、文本）显示成能点开的链接
@@ -54,6 +55,13 @@ function parse(body: string): Block[] {
       if (last?.kind === "paragraph" && last.lines.length > 0) {
         blocks.push({ kind: "paragraph", lines: [] })
       }
+    } else if (trimmed.startsWith("```")) {
+      // 代码块（模型补充里会有几行代码或公式）：原样显示，直到收尾的 ```；没收尾就到正文末尾
+      const code: string[] = []
+      while (i + 1 < lines.length && !lines[i + 1].trim().startsWith("```")) code.push(lines[++i])
+      i++
+      const indent = Math.min(...code.filter((l) => l.trim()).map((l) => l.length - l.trimStart().length), 99)
+      blocks.push({ kind: "code", text: code.map((l) => l.slice(indent)).join("\n").trimEnd() })
     } else if (heading) {
       blocks.push({ kind: "heading", level: heading[1].length, text: heading[2] })
     } else if (image) {
@@ -250,6 +258,15 @@ export function NoteBody({
             alt="录入时的原始截图"
             className="max-w-full rounded-xl border"
           />
+        )
+      case "code":
+        return (
+          <pre
+            key={i}
+            className="overflow-x-auto rounded-lg border bg-background/70 px-3.5 py-2.5 font-mono text-[13px] leading-relaxed"
+          >
+            <code>{block.text}</code>
+          </pre>
         )
       case "paragraph":
         return <p key={i}>{inline(block.lines.join("\n"))}</p>

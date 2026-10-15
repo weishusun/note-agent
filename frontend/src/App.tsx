@@ -108,7 +108,14 @@ function App() {
     const name = count > 0 ? job.created.concat(job.inbox)[0].title : job.label
     const toast: Toast = {
       id: `${job.id}-${job.finished_at}`,
-      text: job.status === "failed" ? `「${name}」录入失败` : `「${name}」录入完成，${count} 条笔记`,
+      text:
+        job.kind === "supplement"
+          ? job.status === "failed"
+            ? `${job.label}没写成，可以在录入页重试`
+            : `${count} 条笔记的模型补充写好了`
+          : job.status === "failed"
+            ? `「${name}」录入失败`
+            : `「${name}」录入完成，${count} 条笔记`,
       failed: job.status === "failed",
     }
     setToasts((list) => [...list, toast])

@@ -25,7 +25,7 @@ export const STAGES = ["解析", "拆分", "分类", "写入"] as const
 
 export interface JobState {
   status: "pending" | "running" | "done" | "failed"
-  stage: (typeof STAGES)[number] | "归类"
+  stage: (typeof STAGES)[number] | "归类" | "模型补充"
   created: NoteRef[]
   inbox: NoteRef[]
   duplicate: boolean
@@ -36,7 +36,8 @@ export interface JobState {
 // 录入队列里的一个任务。created / inbox 是现查的：处理完之后被删、被合并的笔记不再列出来
 export interface IngestJob extends JobState {
   id: string
-  kind: "screenshot" | "text" | "file" | "url"
+  // supplement：录入完自动排的「模型补充」任务，不是使用者提交的
+  kind: "screenshot" | "text" | "file" | "url" | "supplement"
   // 列表里显示的名字：文本的开头、文件名、网址；截图就是「截图」
   label: string
   created_at: string
@@ -312,6 +313,9 @@ export const api = {
   mergeNote: (id: string, into: string) =>
     post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/merge`, { into }),
   keepNote: (id: string) => post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/keep`, {}),
+  // （重新）写模型补充，写完才返回，十几到几十秒
+  supplementNote: (id: string) =>
+    post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/supplement`, {}),
   ref: (id: string) => request<NoteRef>(`/api/refs/${encodeURIComponent(id)}`),
 
   // category 是「大块」或「大块/小块」；不给就是全部笔记
