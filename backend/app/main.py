@@ -1,5 +1,7 @@
 import base64
 import binascii
+import hashlib
+import json
 import logging
 import mimetypes
 from collections.abc import AsyncIterator, Callable
@@ -18,12 +20,13 @@ from app.ask.answer import AskResult, answer_question
 from app.ask.expand import Turn
 from app.config import default_vault_root
 from app.ingest.jobs import JobRegistry, JobState, Progress
-from app.ingest.pipeline import input_hash, run_ingest
+from app.ingest.pipeline import SHORT_TEXT_MAX_CHARS, input_hash, run_ingest
 from app.ingest.queue import IngestQueue, JobNotRetryable, JobRunning, QueuedJob
 from app.ingest.sources import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS, file_extension
 from app.ingest.web import normalize_url
 from app.organize.api import build_router as build_organize_router
 from app.organize.service import Organizer
+from app.organize.supplement import Supplementer
 from app.search.graph import Graph, note_graph
 from app.search.index import SearchIndex
 from app.search.vectors import VectorIndex
@@ -59,6 +62,10 @@ class AskRequest(BaseModel):
             raise ValueError("question 不能为空白")
         return v.strip()
 
+
+# 录入完之后排的「模型补充」任务（不是使用者提交的输入）
+SUPPLEMENT_KIND = "supplement"
+SUPPLEMENT_STAGE = "模型补充"
 
 # 文本再长也只整理前 20 万字（digest.DOC_MAX_CHARS），这里只挡住明显不对劲的输入
 TEXT_MAX_CHARS = 1_000_000
@@ -135,21 +142,33 @@ def _split_refs(refs: list[NoteRef]) -> dict[str, list[NoteRef]]:
     }
 
 
-def create_app(vault_root: Path | None = None, static_dir: Path | None = None) -> FastAPI:
-    """static_dir 给了就连界面一起提供（桌面版）；浏览器开发时界面由 Vite 提供，不用给。"""
+def create_app(
+    vault_root: Path | None = None, static_dir: Path | None = None, auto_supplement: bool = True
+) -> FastAPI:
+    """static_dir 给了就连界面一起提供（桌面版）；浏览器开发时界面由 Vite 提供，不用给。
+
+    auto_supplement：录入完是否自动排「模型补充」任务（测试录入流程本身时关掉）。
+    """
     root = Path(vault_root) if vault_root is not None else default_vault_root()
     store = VaultStore(root)
     taxonomy = TaxonomyManager(root / "taxonomy.yaml")
     index = SearchIndex(store)
     vectors = VectorIndex(index)
     organizer = Organizer(store, taxonomy, index)
+    supplementer = Supplementer(organizer)
     jobs = JobRegistry()
 
     def handle(
         job: QueuedJob, on_stage: Callable[[str], None], on_progress: Callable[[int, int], None]
     ) -> list[str]:
-        """队列线程里执行：把一份排队的输入变成笔记。"""
+        """队列线程里执行：把一份排队的输入变成笔记；kind=supplement 的是给刚录入的笔记写模型补充。"""
         payload = job.payload or b""
+        if job.kind == SUPPLEMENT_KIND:
+            on_stage(SUPPLEMENT_STAGE)
+            done, errors = supplementer.supplement_many(json.loads(payload), on_progress)
+            if errors:
+                raise RuntimeError(f"{len(errors)} 条笔记的模型补充没写成：{errors[0]}")
+            return done
         ids = run_ingest(
             store,
             index,
@@ -165,7 +184,28 @@ def create_app(vault_root: Path | None = None, static_dir: Path | None = None) -
             on_progress=on_progress,
         )
         index.put_ingest_log(job.input_hash, ids, datetime.now().astimezone().isoformat())
+        if auto_supplement:
+            queue_supplements(job, ids, payload)
         return ids
+
+    def queue_supplements(job: QueuedJob, ids: list[str], payload: bytes) -> None:
+        """录入完排一个「模型补充」任务：笔记先出来，补充随后补上（SCHEMA 2.1）。
+
+        概念笔记都补；主题笔记只补截图和短文本的——长资料的主题笔记是摘要和大纲，补充只会把资料再讲一遍。
+        """
+        short = job.kind == "screenshot" or (
+            job.kind == "text" and len(payload.decode("utf-8").strip()) < SHORT_TEXT_MAX_CHARS
+        )
+        wanted = [r.id for r in refs_by_ids(index, ids) if r.type == "concept" or short]
+        if not wanted:
+            return
+        digest = hashlib.sha256(("supplement\0" + ",".join(wanted)).encode("utf-8")).hexdigest()
+        queue.submit(
+            kind=SUPPLEMENT_KIND,
+            label=f"模型补充 · {job.label}"[: _LABEL_CHARS + 7],
+            payload=json.dumps(wanted).encode("utf-8"),
+            input_hash=digest,
+        )
 
     queue = IngestQueue(store.state_dir / "queue.db", handle)
 

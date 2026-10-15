@@ -317,7 +317,6 @@ TOPIC = {
     "title": "大模型的训练流程",
     "summary": "从随机初始化到可用的大模型要经过的几个训练阶段。",
     "content": "1. **文字接龙训练** ← 非结构化文本数据\n2. **SFT** ← 高质量人工标注数据",
-    "supplement": "这是典型的训练流程。",
 }
 
 
@@ -330,16 +329,20 @@ def _concept(**overrides) -> dict:
 
 
 def test_extraction_returns_topic_and_concepts(monkeypatch: pytest.MonkeyPatch) -> None:
-    wire = _wire(TOPIC, _concept(title="SFT", supplement=["SFT 即监督微调"]), _concept(title="RLHF"))
+    # 模型补充由单独的补充步骤写（app/extract/supplement.py）：提取时模型就算给了也不要
+    wire = _wire(
+        {**TOPIC, "supplement": "这是典型的训练流程。"},
+        _concept(title="SFT", supplement=["SFT 即监督微调"]),
+        _concept(title="RLHF"),
+    )
     _patch_extract(monkeypatch, [_ok(wire)])
 
     extraction, _usage = extractor.extract_drafts(b"\x89PNG", None)
 
     assert extraction.topic is not None
-    assert extraction.topic.model_dump() == TOPIC
+    assert extraction.topic.model_dump() == {**TOPIC, "supplement": ""}
     assert [c.title for c in extraction.concepts] == ["SFT", "RLHF"]
-    assert extraction.concepts[0].supplement == ["SFT 即监督微调"]
-    assert extraction.concepts[1].supplement == []
+    assert [c.supplement for c in extraction.concepts] == [[], []]
 
 
 def test_single_concept_input_has_no_topic(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -377,19 +380,19 @@ def test_wire_format_tolerates_what_the_real_model_sends() -> None:
         {
             "topic": {},
             "concepts": [
-                _concept(supplement="", aliases=None, related="不确定性原理", points="只有一条要点"),
+                _concept(aliases=None, related="不确定性原理", points="只有一条要点"),
             ],
         }
     )
     assert wire.topic is None
     concept = wire.concepts[0]
-    assert (concept.supplement, concept.aliases) == ([], [])
+    assert concept.aliases == []
     assert (concept.related, concept.points) == (["不确定性原理"], ["只有一条要点"])
 
     topic = extractor._DraftBatch.model_validate(
-        {"topic": {**TOPIC, "supplement": None, "content": ["第一行", "第二行"]}, "concepts": None}
+        {"topic": {**TOPIC, "content": ["第一行", "第二行"]}, "concepts": None}
     )
-    assert (topic.topic.supplement, topic.topic.content, topic.concepts) == ("", "第一行\n第二行", [])
+    assert (topic.topic.content, topic.concepts) == ("第一行\n第二行", [])
 
 
 def test_both_wire_fields_are_required() -> None:
@@ -418,35 +421,18 @@ def test_title_parentheses_move_into_aliases(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_overlong_topic_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    wire = _wire({**TOPIC, "summary": "概" * 100, "content": "行\n" * 3000, "supplement": "补" * 400})
+    wire = _wire({**TOPIC, "summary": "概" * 100, "content": "行\n" * 3000})
     _patch_extract(monkeypatch, [_ok(wire)])
-    compressor = _patch_classify(
-        monkeypatch, [_ok(extractor._Compressed(items=["压缩后的概要", "压缩后的补充"]))]
-    )
+    compressor = _patch_classify(monkeypatch, [_ok(extractor._Compressed(items=["压缩后的概要"]))])
 
     extraction, _usage = extractor.extract_drafts(None, "文本")
     topic = extraction.topic
 
-    assert (topic.summary, topic.supplement) == ("压缩后的概要", "压缩后的补充")
+    assert topic.summary == "压缩后的概要"
     # 内容是结构化正文：不送去压缩，超长只截断并说明
     assert len(topic.content) <= 4000 and topic.content.endswith("完整内容见原始输入)")
     body = compressor.messages[0][0].content
-    assert "(上限 80 字)" in body and "(上限 300 字)" in body and "行\n行" not in body
-
-
-def test_supplement_is_trimmed_like_other_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    wire = _wire(None, _concept(supplement=["甲", " 甲 ", "", "乙", "丙", "丁", "戊"]))
-    _patch_extract(monkeypatch, [_ok(wire)])
-    extraction, _usage = extractor.extract_drafts(None, "文本")
-    assert extraction.concepts[0].supplement == ["甲", "乙", "丙", "丁"]  # 去空、去重、最多 4 条
-
-
-def test_placeholder_supplements_are_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """真实接口上见过：没什么可补充时，模型把提示词里的话或一句「无」填了进来。"""
-    wire = _wire(None, _concept(supplement=["不是来自用户的资料", "无", "暂无补充。", "LoRA 即低秩适配"]))
-    _patch_extract(monkeypatch, [_ok(wire)])
-    extraction, _usage = extractor.extract_drafts(None, "文本")
-    assert extraction.concepts[0].supplement == ["LoRA 即低秩适配"]
+    assert "(上限 80 字)" in body and "行\n行" not in body
 
 
 def test_extraction_always_uses_json_mode_and_spells_out_the_format(

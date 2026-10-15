@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from app.ingest.jobs import JobRegistry, Progress
 from app.organize.editor import NoteEditor
 from app.organize.service import CategoryNotEmpty, NoteNotFound, Organizer, ReclassifyRunning
+from app.organize.supplement import Supplementer
 from app.search.query import find_by_id
 from app.vault.models import NoteRef, Tree
 from app.vault.taxonomy import CategoryExists, CategoryNotFound
@@ -61,6 +62,7 @@ class ReclassifyBody(BaseModel):
 def build_router(organizer: Organizer, jobs: JobRegistry) -> APIRouter:
     router = APIRouter()
     editor = NoteEditor(organizer)
+    supplementer = Supplementer(organizer)
 
     @router.get("/api/refs/{note_id}")
     def api_ref(note_id: str) -> NoteRef:
@@ -116,6 +118,17 @@ def build_router(organizer: Organizer, jobs: JobRegistry) -> APIRouter:
             return editor.keep(note_id)
         except NoteNotFound:
             raise HTTPException(status_code=404, detail="笔记不存在")
+
+    @router.post("/api/notes/{note_id}/supplement")
+    def api_supplement_note(note_id: str) -> NoteRef:
+        """（重新）写这条笔记的模型补充，写完才返回（十几到几十秒）。原来的补充整段换掉。"""
+        try:
+            return supplementer.supplement(note_id)
+        except NoteNotFound:
+            raise HTTPException(status_code=404, detail="笔记不存在")
+        except Exception as exc:
+            logger.exception("模型补充失败: %s", note_id)
+            raise HTTPException(status_code=502, detail=f"模型补充没写成：{str(exc)[:300]}")
 
     @router.get("/api/tree")
     def api_tree() -> Tree:

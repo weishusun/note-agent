@@ -116,10 +116,13 @@ def _merge_section(
 ) -> list[str]:
     if heading == SUPPLEMENT_HEADING:
         # 固定的说明行只留一份，放在最前面
-        content = _union(
-            [line for line in lines if line.strip() != SUPPLEMENT_MARKER],
-            [line for line in extra if line.strip() != SUPPLEMENT_MARKER],
-        )
+        mine = _trim([line for line in lines if line.strip() != SUPPLEMENT_MARKER])
+        theirs = _trim([line for line in extra if line.strip() != SUPPLEMENT_MARKER])
+        if mine and theirs and not (_all_bullets(mine) and _all_bullets(theirs)):
+            # 成段的补充（补充技能写的）逐行拼起来就乱了：留保留那条的，想要可以重新补充
+            content = mine
+        else:
+            content = _union(mine, theirs)
         return [SUPPLEMENT_MARKER, "", *_trim(content)]
     merged = _union(lines, extra)
     if heading in _LINK_SECTIONS:
@@ -127,6 +130,10 @@ def _merge_section(
         merged = [line for line in merged if line.strip() not in dead and line.strip() != _EMPTY]
         return merged or [_EMPTY]
     return merged
+
+
+def _all_bullets(lines: list[str]) -> bool:
+    return all(line.strip().startswith("- ") for line in lines if line.strip())
 
 
 def _is_plain_list(

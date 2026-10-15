@@ -111,7 +111,8 @@ def stubs(monkeypatch: pytest.MonkeyPatch) -> Stubs:
 
 @pytest.fixture
 def client(vault_root: Path, stubs: Stubs) -> TestClient:
-    return TestClient(create_app(vault_root))
+    # 录入完自动排的模型补充另有测试（test_supplement.py），这里只看录入本身
+    return TestClient(create_app(vault_root, auto_supplement=False))
 
 
 def _ingest(client: TestClient, **body) -> dict:
@@ -574,7 +575,7 @@ def test_unfinished_jobs_are_picked_up_when_the_app_restarts(vault_root: Path, s
         for label, status in (("处理到一半的", "running"), ("还没轮到的", "pending"))
     ]  # fmt: skip
 
-    with TestClient(create_app(vault_root)) as restarted:  # with：走一遍启动流程
+    with TestClient(create_app(vault_root, auto_supplement=False)) as restarted:  # with：走一遍启动流程
         assert restarted.app.state.queue.wait_idle()
         jobs = [restarted.get(f"/api/jobs/{i}").json() for i in ids]
 

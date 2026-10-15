@@ -24,6 +24,9 @@ _PROBE_TIMEOUT_SECONDS = 60.0
 _EMBED_TIMEOUT_SECONDS = 30.0
 # 整理长资料:一次调用要读一两万字、写出上千字
 _DIGEST_TIMEOUT_SECONDS = 240.0
+# 模型补充:写 600-1000 字
+_SUPPLEMENT_TIMEOUT_SECONDS = 180.0
+_SUPPLEMENT_MAX_TOKENS = 4096
 
 def _build(
     role: settings.RoleName,
@@ -31,6 +34,7 @@ def _build(
     timeout: float = _TIMEOUT_SECONDS,
     max_retries: int = 1,
     no_thinking: bool = False,
+    max_tokens: int | None = None,
 ):
     """按设置里这个环节选的服务商和模型建客户端。override 只换模型名，服务商不变。
 
@@ -50,6 +54,7 @@ def _build(
         timeout=timeout,
         max_retries=max_retries,
         extra_body=target.no_thinking if no_thinking else None,
+        max_tokens=max_tokens,
     )
 
 
@@ -91,6 +96,21 @@ def get_expand_model(override: str | None = None):
 def get_answer_model(override: str | None = None):
     """问答模型(没选时沿用文字模型)。保持思考开启:回答质量是用户直接看到的。"""
     return _build("answer", override)
+
+
+def get_supplement_model(override: str | None = None):
+    """写模型补充用问答模型(没选时就是文字模型):写的是给人读的讲解,和回答问题一样看重质量。
+
+    关不关思考跟着小调用的设置走:录入时每条笔记都要补一次,开着思考太慢。
+    输出要 600-1000 字,max_tokens 给足,免得被服务商的默认上限截断。
+    """
+    return _build(
+        "answer",
+        override,
+        timeout=_SUPPLEMENT_TIMEOUT_SECONDS,
+        no_thinking=settings.load().disable_thinking,
+        max_tokens=_SUPPLEMENT_MAX_TOKENS,
+    )
 
 
 def bind_json(model, schema):

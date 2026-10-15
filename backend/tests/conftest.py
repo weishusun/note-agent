@@ -77,6 +77,24 @@ def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+FAKE_SUPPLEMENT = "### 是什么\n\n测试用的模型补充。"
+
+
+@pytest.fixture(autouse=True)
+def supplement_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """录入完会自动排「模型补充」任务：测试里一律换成假的，记下调用，绝不打真实接口。"""
+    from app.extract import supplement
+
+    calls: list[dict] = []
+
+    def fake(title: str, summary: str, body: str, **kwargs: object) -> str:
+        calls.append({"title": title, "summary": summary, "body": body, **kwargs})
+        return FAKE_SUPPLEMENT
+
+    monkeypatch.setattr(supplement, "write_supplement", fake)
+    return calls
+
+
 @pytest.fixture(autouse=True)
 def git_messages(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """测试里的 vault 不是 git 仓库：把提交换成记录 message，也避免误提交到外层的某个仓库。"""

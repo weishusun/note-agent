@@ -26,11 +26,8 @@ from app.extract.models import (
     POINTS_MAX,
     RELATED_MAX,
     SUMMARY_MAX,
-    SUPPLEMENT_MAX,
-    SUPPLEMENT_POINT_MAX,
     TITLE_MAX,
     TOPIC_CONTENT_MAX,
-    TOPIC_SUPPLEMENT_MAX,
     Extraction,
     NoteDraft,
     TopicDraft,
@@ -79,12 +76,8 @@ class _WireDraft(BaseModel):
     points: list[str] = Field(description=f"1 到 {POINTS_MAX} 条,每条不超过 {POINT_MAX} 字")
     aliases: list[str] = Field(default_factory=list, description=f"最多 {ALIASES_MAX} 个")
     related: list[str] = Field(default_factory=list, description=f"最多 {RELATED_MAX} 个")
-    supplement: list[str] = Field(
-        default_factory=list,
-        description=f"模型用自身知识补充的内容,0 到 {SUPPLEMENT_MAX} 条,每条不超过 {SUPPLEMENT_POINT_MAX} 字",
-    )
 
-    _lists = field_validator("points", "aliases", "related", "supplement", mode="before")(_as_list)
+    _lists = field_validator("points", "aliases", "related", mode="before")(_as_list)
 
 
 class _WireTopic(BaseModel):
@@ -93,11 +86,8 @@ class _WireTopic(BaseModel):
     title: str = Field(description=f"不超过 {TITLE_MAX} 字")
     summary: str = Field(description=f"一句话,不超过 {SUMMARY_MAX} 字")
     content: str = Field(description="保留输入原有结构的 Markdown:表格、带箭头的有序列表、嵌套列表")
-    supplement: str = Field(
-        default="", description=f"模型用自身知识补充的背景,不超过 {TOPIC_SUPPLEMENT_MAX} 字,可留空"
-    )
 
-    _texts = field_validator("content", "supplement", mode="before")(_as_text)
+    _texts = field_validator("content", mode="before")(_as_text)
 
 
 class _DraftBatch(BaseModel):
@@ -168,9 +158,7 @@ def _fit(batch: _DraftBatch, keep_topic: bool = False) -> Extraction:
         if len(points) > POINTS_MAX:
             logger.warning("draft %r 有 %d 条要点,只保留前 %d 条", title, len(points), POINTS_MAX)
         # 一条要点都没有时用概要顶上:NoteDraft 至少要一条
-        concepts.append(
-            (title, summary, points[:POINTS_MAX] or [summary], _real_supplement(wire.supplement), wire)
-        )
+        concepts.append((title, summary, points[:POINTS_MAX] or [summary], wire))
 
     topic = batch.topic
     if topic is not None:
@@ -197,17 +185,14 @@ def _fit(batch: _DraftBatch, keep_topic: bool = False) -> Extraction:
         if len(value) > limit and (value, limit) not in too_long:
             too_long.append((value, limit))
 
-    for title, summary, points, supplement, _wire in concepts:
+    for title, summary, points, _wire in concepts:
         check(title, TITLE_MAX)
         check(summary, SUMMARY_MAX)
         for point in points:
             check(point, POINT_MAX)
-        for extra in supplement:
-            check(extra, SUPPLEMENT_POINT_MAX)
     if topic is not None:
         check(topic.title.strip(), TITLE_MAX)
         check(topic.summary.strip(), SUMMARY_MAX)
-        check(topic.supplement.strip(), TOPIC_SUPPLEMENT_MAX)
     shortened = dict(zip(too_long, _compress(too_long))) if too_long else {}
 
     def fit(value: str, limit: int) -> str:
@@ -226,7 +211,6 @@ def _fit(batch: _DraftBatch, keep_topic: bool = False) -> Extraction:
             title=fit(topic.title.strip(), TITLE_MAX),
             summary=fit(topic.summary.strip(), SUMMARY_MAX),
             content=_clip_content(topic.content.strip()),
-            supplement=fit(topic.supplement.strip(), TOPIC_SUPPLEMENT_MAX),
         ),
         concepts=[
             NoteDraft(
@@ -235,9 +219,8 @@ def _fit(batch: _DraftBatch, keep_topic: bool = False) -> Extraction:
                 points=[fit(p, POINT_MAX) for p in points],
                 aliases=_dedupe(wire.aliases)[:ALIASES_MAX],
                 related=_dedupe(wire.related)[:RELATED_MAX],
-                supplement=[fit(extra, SUPPLEMENT_POINT_MAX) for extra in supplement],
             )
-            for title, summary, points, supplement, wire in concepts
+            for title, summary, points, wire in concepts
         ],
     )
 
@@ -259,14 +242,6 @@ def _clip_content(content: str) -> str:
         return content
     logger.warning("主题笔记的内容有 %d 字,截断到 %d 字", len(content), TOPIC_CONTENT_MAX)
     return content[: TOPIC_CONTENT_MAX - len(_TRUNCATED_NOTE)] + _TRUNCATED_NOTE
-
-
-# 模型没有可补充的内容时，偶尔会把提示词里的话或一句「无」填进来，而不是留空
-_NOT_A_SUPPLEMENT = re.compile(r"不是来自|来自用户的资料|来自你的资料|^(暂?无|没有)(补充)?[。.]?$")
-
-
-def _real_supplement(items: list[str]) -> list[str]:
-    return [s for s in _dedupe(items) if not _NOT_A_SUPPLEMENT.search(s)][:SUPPLEMENT_MAX]
 
 
 def _dedupe(values: list[str]) -> list[str]:

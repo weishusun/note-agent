@@ -1,9 +1,12 @@
 """vault 仓库的 git 提交。vault 是独立仓库，与 note-agent 代码仓库无关。"""
 
 import subprocess
+import threading
 from pathlib import Path
 
 GIT_TIMEOUT_SECONDS = 120
+# 录入队列、模型补充（并行几条）、界面上的编辑都会提交：同时跑会撞上 git 的 index.lock
+_COMMIT_LOCK = threading.Lock()
 
 
 def commit(vault_root: Path, message: str) -> bool:
@@ -27,9 +30,10 @@ def commit(vault_root: Path, message: str) -> bool:
             timeout=GIT_TIMEOUT_SECONDS,
         )
 
-    run("add", "-A")
-    status = run("status", "--porcelain")
-    if not status.stdout.strip():
-        return False
-    run("commit", "-m", message)
-    return True
+    with _COMMIT_LOCK:
+        run("add", "-A")
+        status = run("status", "--porcelain")
+        if not status.stdout.strip():
+            return False
+        run("commit", "-m", message)
+        return True

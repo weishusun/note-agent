@@ -13,7 +13,7 @@ from app.vault.ids import new_ulid
 from app.vault.models import NoteRef
 
 JobStatus = Literal["pending", "running", "done", "failed"]
-Stage = Literal["解析", "拆分", "分类", "写入", "归类"]
+Stage = Literal["解析", "拆分", "分类", "写入", "归类", "模型补充"]
 
 
 class Progress(BaseModel):
