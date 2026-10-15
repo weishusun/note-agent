@@ -813,6 +813,12 @@ CREATE TABLE embeddings (
 
 用补充技能(§2.3)给这条笔记重新写 `## 模型补充`,写完才返回(十几到几十秒)。不存在 `404`;模型调用失败或写得太短 `502`,笔记不变。
 
+### `GET /api/supplements?scope=outdated` → `{ "count": 9 }` / `POST /api/supplements` → `202 { "count": 9, "jobs": 1 }`
+
+给已有的笔记批量写模型补充(§2.3)。`scope`:`outdated`(默认)= 还没有补充、或只有提取时写的短补充的
+(全是列表项,或不到 400 字);`all` = 全部重写。长资料的主题笔记都不算。`GET` 只数一数;`POST` 每 10 条排一个
+`supplement` 任务进录入队列(标签「模型补充 · 已有笔记 1/3(10 条)」),立即返回。
+
 ### `POST /api/notes/{id}/keep` → `NoteRef`
 
 对一条疑似重复的笔记选择「两条都留」:清空它的 `duplicate_of`。

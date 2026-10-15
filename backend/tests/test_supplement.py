@@ -12,14 +12,14 @@ from app.extract.models import Extraction
 from app.ingest.assemble import SUPPLEMENT_HEADING, SUPPLEMENT_MARKER
 from app.main import SUPPLEMENT_KIND, create_app
 from app.organize.merge import merge_bodies
-from app.organize.supplement import material_of, replace_supplement
+from app.organize.supplement import material_of, replace_supplement, supplement_state
 
 # conftest 会把 write_supplement 换成假的，这里先拿到真的
 from app.extract.supplement import write_supplement as real_write_supplement
 from tests.conftest import FAKE_SUPPLEMENT
 from tests.test_ingest import CONCEPTS, PNG, TOPIC, Stubs, _ingest, stubs  # noqa: F401
 
-LONG = "这是一段足够长的补充内容，用来通过最短长度的检查。" * 8
+LONG = "这是一段足够长的补充内容，用来通过最短长度的检查。" * 20
 
 
 # ---------- 整理模型的输出 ----------
@@ -198,6 +198,55 @@ def test_failed_supplements_fail_the_job_and_can_be_retried(
     assert auto_client.post(f"/api/jobs/{job['id']}/retry").status_code == 202
     assert _jobs(auto_client)[0]["status"] == "done"
     assert FAKE_SUPPLEMENT in (vault_root / "notes" / "RAG.md").read_text(encoding="utf-8")
+
+
+# ---------- 批量补充已有笔记 ----------
+
+
+def test_supplement_state() -> None:
+    assert supplement_state("## 要点\n- 一条\n") == "missing"
+    assert supplement_state(f"{SUPPLEMENT_HEADING}\n{SUPPLEMENT_MARKER}\n") == "missing"
+    assert supplement_state(BODY) == "old"
+    # 旧版主题笔记的补充是一小段话：也算旧的
+    assert supplement_state(replace_supplement(BODY, "两者可以结合使用。")) == "old"
+    assert supplement_state(replace_supplement(BODY, f"### 是什么\n\n{LONG}")) == "written"
+
+
+def test_batch_supplements_the_outdated_notes(
+    vault_root: Path, stubs: Stubs, monkeypatch: pytest.MonkeyPatch, supplement_calls: list[dict]  # noqa: F811
+) -> None:
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "SUPPLEMENT_BATCH", 2)
+    # 旧版录入：提取时写的短补充（RAG 有列表补充，Fine-tuning 没有，主题笔记有一句话）
+    old = TestClient(create_app(vault_root, auto_supplement=False))
+    _ingest(old, kind="text", text="RAG 与微调的对比")
+    # 长资料的主题笔记（摘要 + 大纲）不补
+    stubs.extraction = Extraction(
+        topic=TOPIC.model_copy(update={"content": "### 摘要\n一段摘要。\n\n### 大纲\n1. **第一节**", "supplement": ""}),
+        concepts=CONCEPTS,
+    )
+    _ingest(old, kind="text", text="长" * 3000, force=True)
+    client = TestClient(create_app(vault_root))
+
+    outdated = client.get("/api/supplements").json()["count"]
+    everything = client.get("/api/supplements", params={"scope": "all"}).json()["count"]
+    # 第一次录入 3 条 + 长资料录入的 2 条概念（主题笔记是摘要和大纲，不算）
+    assert (outdated, everything) == (5, 5)
+
+    resp = client.post("/api/supplements", json={})
+    assert resp.status_code == 202 and resp.json() == {"count": 5, "jobs": 3}
+    jobs = [j for j in _jobs(client) if j["kind"] == SUPPLEMENT_KIND]
+    assert [j["label"] for j in jobs] == [
+        "模型补充 · 已有笔记 3/3（1 条）",
+        "模型补充 · 已有笔记 2/3（2 条）",
+        "模型补充 · 已有笔记 1/3（2 条）",
+    ]
+    assert all(j["status"] == "done" for j in jobs) and len(supplement_calls) == 5
+    # 补过的不再算「要补」；all 照样全部重写
+    assert client.get("/api/supplements").json()["count"] == 0
+    assert client.get("/api/supplements", params={"scope": "all"}).json()["count"] == 5
+    assert client.post("/api/supplements", json={"scope": "nonsense"}).status_code == 422
 
 
 # ---------- 阅读区「重新补充」 ----------

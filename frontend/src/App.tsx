@@ -232,7 +232,7 @@ function App() {
           )}
           {page === "settings" && (
             <Column title="设置" lead="模型服务商、密钥和各环节用的模型。">
-              <SettingsPanel />
+              <SettingsPanel onQueued={ingest.refresh} />
             </Column>
           )}
         </main>

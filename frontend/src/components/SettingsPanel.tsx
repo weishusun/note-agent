@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import { api, type Locations } from "@/lib/api"
 import { desktop } from "@/lib/desktop"
 
-export function SettingsPanel() {
+// onQueued：批量补充排进了录入队列，让队列状态刷新一下
+export function SettingsPanel({ onQueued }: { onQueued?: () => void }) {
   const [locations, setLocations] = useState<Locations | null>(null)
 
   useEffect(() => {
@@ -17,9 +18,80 @@ export function SettingsPanel() {
   return (
     <div className="flex flex-col gap-8">
       <ModelSettings settingsPath={locations?.settings ?? null} />
+      <BatchSupplement onQueued={onQueued} />
       {locations && <VaultLocation path={locations.vault} />}
       {desktop && <DesktopShortcut />}
     </div>
+  )
+}
+
+// 粗估：一条十几秒，三条一起写
+const SECONDS_PER_NOTE = 5
+
+function BatchSupplement({ onQueued }: { onQueued?: () => void }) {
+  const [count, setCount] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    api.supplementCandidates().then((r) => setCount(r.count), () => undefined)
+  }, [])
+
+  async function start(scope: "outdated" | "all") {
+    if (scope === "all" && !window.confirm("给所有笔记重新写模型补充？原来的补充会整段换掉。")) return
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await api.batchSupplement(scope)
+      setNotice(
+        r.count === 0
+          ? "没有要补的笔记。"
+          : `已排进录入队列：${r.count} 条笔记，分 ${r.jobs} 个任务。可以在「录入」页看进度，关掉应用下次会接着补。`,
+      )
+      if (scope === "outdated") setCount(0)
+      onQueued?.()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+    setBusy(false)
+  }
+
+  if (count === null) return null
+  const minutes = Math.max(1, Math.round((count * SECONDS_PER_NOTE) / 60))
+  return (
+    <section className="flex flex-col gap-2" aria-labelledby="batch-supplement">
+      <h2 id="batch-supplement" className="font-heading text-lg">
+        模型补充
+      </h2>
+      <p className="text-sm text-muted-foreground">
+        新录入的笔记会自动补上。
+        {count > 0
+          ? `已有的笔记里有 ${count} 条还没有补充，或者只有以前那种几句话的短补充，全部补上大约要 ${minutes} 分钟。`
+          : "已有的笔记都补过了。"}
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        {count > 0 && (
+          <Button type="button" disabled={busy} onClick={() => void start("outdated")}>
+            给这 {count} 条补上
+          </Button>
+        )}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void start("all")}
+          className="text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          全部重写
+        </button>
+      </div>
+      {notice && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {notice}
+        </p>
+      )}
+      {error && <Alert tone="error">{error}</Alert>}
+    </section>
   )
 }
 

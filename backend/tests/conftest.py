@@ -77,7 +77,8 @@ def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-FAKE_SUPPLEMENT = "### 是什么\n\n测试用的模型补充。"
+# 和补充技能真写出来的一样长（够 400 字才算「写过了」，见 organize/supplement.supplement_state）
+FAKE_SUPPLEMENT = "### 是什么\n\n" + "测试用的模型补充。" * 50
 
 
 @pytest.fixture(autouse=True)

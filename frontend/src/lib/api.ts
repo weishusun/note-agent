@@ -313,6 +313,11 @@ export const api = {
   mergeNote: (id: string, into: string) =>
     post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/merge`, { into }),
   keepNote: (id: string) => post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/keep`, {}),
+  // 批量补充：outdated = 还没有、或只有旧的短补充的笔记；all = 全部重写
+  supplementCandidates: (scope: "outdated" | "all" = "outdated") =>
+    request<{ count: number }>(`/api/supplements?${query({ scope })}`),
+  batchSupplement: (scope: "outdated" | "all" = "outdated") =>
+    post<{ count: number; jobs: number }>("/api/supplements", { scope }),
   // （重新）写模型补充，写完才返回，十几到几十秒
   supplementNote: (id: string) =>
     post<NoteRef>(`/api/notes/${encodeURIComponent(id)}/supplement`, {}),

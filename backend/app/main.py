@@ -26,7 +26,7 @@ from app.ingest.sources import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS, file_extens
 from app.ingest.web import normalize_url
 from app.organize.api import build_router as build_organize_router
 from app.organize.service import Organizer
-from app.organize.supplement import Supplementer
+from app.organize.supplement import BatchScope, Supplementer
 from app.search.graph import Graph, note_graph
 from app.search.index import SearchIndex
 from app.search.vectors import VectorIndex
@@ -66,6 +66,13 @@ class AskRequest(BaseModel):
 # 录入完之后排的「模型补充」任务（不是使用者提交的输入）
 SUPPLEMENT_KIND = "supplement"
 SUPPLEMENT_STAGE = "模型补充"
+# 批量补充已有笔记时，每个任务几条
+SUPPLEMENT_BATCH = 10
+
+
+class BatchSupplementRequest(BaseModel):
+    # outdated：还没有补充、或只有提取时写的短句的；all：全部重写
+    scope: BatchScope = "outdated"
 
 # 文本再长也只整理前 20 万字（digest.DOC_MAX_CHARS），这里只挡住明显不对劲的输入
 TEXT_MAX_CHARS = 1_000_000
@@ -197,14 +204,13 @@ def create_app(
             job.kind == "text" and len(payload.decode("utf-8").strip()) < SHORT_TEXT_MAX_CHARS
         )
         wanted = [r.id for r in refs_by_ids(index, ids) if r.type == "concept" or short]
-        if not wanted:
-            return
-        digest = hashlib.sha256(("supplement\0" + ",".join(wanted)).encode("utf-8")).hexdigest()
-        queue.submit(
-            kind=SUPPLEMENT_KIND,
-            label=f"模型补充 · {job.label}"[: _LABEL_CHARS + 7],
-            payload=json.dumps(wanted).encode("utf-8"),
-            input_hash=digest,
+        if wanted:
+            submit_supplements(wanted, f"模型补充 · {job.label}"[: _LABEL_CHARS + 7])
+
+    def submit_supplements(ids: list[str], label: str) -> str:
+        digest = hashlib.sha256(("supplement\0" + ",".join(ids)).encode("utf-8")).hexdigest()
+        return queue.submit(
+            kind=SUPPLEMENT_KIND, label=label, payload=json.dumps(ids).encode("utf-8"), input_hash=digest
         )
 
     queue = IngestQueue(store.state_dir / "queue.db", handle)
@@ -372,6 +378,22 @@ def create_app(
         """在后台把缺的、过期的向量补上（比如刚在设置页填了向量模型）。马上返回当前状态。"""
         vectors.request_sync()
         return vectors.status()
+
+    @app.get("/api/supplements")
+    def api_supplement_candidates(scope: BatchScope = "outdated") -> dict[str, int]:
+        """批量补充之前先看看有多少条要补。"""
+        return {"count": len(supplementer.candidates(scope))}
+
+    @app.post("/api/supplements", status_code=202)
+    def api_batch_supplement(req: BatchSupplementRequest) -> dict[str, int]:
+        """给已有的笔记批量写模型补充：每 SUPPLEMENT_BATCH 条排一个任务，排在队尾。
+        分成小批是为了某条失败时重试的代价小，进度也看得清楚。"""
+        ids = supplementer.candidates(req.scope)
+        batches = [ids[i : i + SUPPLEMENT_BATCH] for i in range(0, len(ids), SUPPLEMENT_BATCH)]
+        for n, batch in enumerate(batches, 1):
+            part = f" {n}/{len(batches)}" if len(batches) > 1 else ""
+            submit_supplements(batch, f"模型补充 · 已有笔记{part}（{len(batch)} 条）")
+        return {"count": len(ids), "jobs": len(batches)}
 
     @app.get("/api/locations")
     def api_locations() -> dict[str, str]:

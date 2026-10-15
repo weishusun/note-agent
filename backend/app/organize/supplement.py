@@ -8,13 +8,14 @@ import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import Literal
 
 from app.extract import supplement as supplement_writer
 from app.ingest.assemble import SUPPLEMENT_HEADING, SUPPLEMENT_MARKER
 from app.organize.merge import Section, parse_sections, render_sections
 from app.organize.service import NoteNotFound, Organizer
-from app.search.query import find_by_id
-from app.vault.models import NoteRef
+from app.search.query import all_refs, find_by_id
+from app.vault.models import Note, NoteRef
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,8 @@ _SOURCE = "## 原始输入"
 _AFTER_SUPPLEMENT = ("## 关联", "## 概念", _SOURCE)
 # 一次录入的几条笔记同时补，别一下子打太多请求
 _PARALLEL = 3
+# 比旧版主题笔记补充的上限（300 字）长出一截才算补充技能写的
+_WRITTEN_MIN_CHARS = 400
 
 
 def material_of(body: str) -> str:
@@ -42,6 +45,34 @@ def replace_supplement(body: str, text: str) -> str:
     at = next((i for i, (h, _l) in enumerate(sections) if h in _AFTER_SUPPLEMENT), len(sections))
     sections.insert(at, block)
     return render_sections(sections)
+
+
+BatchScope = Literal["outdated", "all"]
+
+
+def supplement_state(body: str) -> Literal["missing", "old", "written"]:
+    """missing：没有模型补充；old：提取时写的短补充；written：补充技能写的成段内容。
+
+    旧的补充是几条短句（概念笔记，列表）或一小段话（主题笔记，最多 300 字）；
+    补充技能写的是 600–1000 字的成段内容。按「是不是全是列表项」和长度区分。
+    """
+    for heading, lines in parse_sections(body):
+        if heading == SUPPLEMENT_HEADING:
+            content = [line for line in lines if line.strip() and line.strip() != SUPPLEMENT_MARKER]
+            if not content:
+                return "missing"
+            if all(line.strip().startswith("- ") for line in content):
+                return "old"
+            return "written" if len("\n".join(content)) >= _WRITTEN_MIN_CHARS else "old"
+    return "missing"
+
+
+def is_digest_topic(note: Note) -> bool:
+    """长资料（文件、网页、长文本）的主题笔记：正文是摘要和大纲，补充只会把资料再讲一遍，不补。"""
+    fm = note.frontmatter
+    if fm.type != "topic":
+        return False
+    return fm.source.kind in ("file", "url") or "\n### 摘要" in f"\n{note.body}"
 
 
 class Supplementer:
@@ -73,6 +104,23 @@ class Supplementer:
         self.index.upsert_note(updated)
         self.organizer._commit(f"note: 模型补充「{updated.frontmatter.title}」")
         return find_by_id(self.index, note_id) or ref
+
+    def candidates(self, scope: BatchScope = "outdated") -> list[str]:
+        """批量补充要补哪些笔记（按路径排序）。
+
+        outdated：还没有补充、或者只有提取时写的短句的；all：全部重写。长资料的主题笔记都不算。
+        """
+        ids = []
+        for ref in all_refs(self.index):
+            try:
+                note = self.store.read_note(ref.path)
+            except (FileNotFoundError, ValueError):
+                continue
+            if is_digest_topic(note):
+                continue
+            if scope == "all" or supplement_state(note.body) != "written":
+                ids.append(ref.id)
+        return ids
 
     def supplement_many(
         self, note_ids: list[str], on_progress: Callable[[int, int], None] | None = None
