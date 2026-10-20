@@ -7,6 +7,7 @@
 **版本:v9**
 第 6 步(打包成桌面应用)没有改数据格式,版本号不变:新增 §7「桌面版运行时」和 `GET /api/locations`(§5)。
 模型补充改由单独的「补充技能」写(§2.3 不变量 14 的说明、`POST /api/notes/{id}/supplement`、队列里的 `supplement` 任务),笔记格式只是放宽(区块里可以有 `###` 小标题、代码块),版本号不变。
+「我的导图」(§8)是新增的 `mindmaps/` 目录和一组接口,不涉及笔记和索引,版本号不变。
 设置页改版(各环节可分用不同服务商)同样不涉及笔记和索引,版本号不变:设置的格式、`GET /api/providers`、`POST /api/providers/{id}/models` 见 §5。
 
 v8 → v9 变更(界面改版,列表里显示截图缩略图):`NoteRef` 新增 `image`,索引的 `notes` 表新增 `image` 列(§4、§5)。
@@ -74,6 +75,7 @@ vault/                       # 是 git 仓库时每次改动自动提交;不是�
 ├── inbox/                   # 旧目录：v3 及以前的未分类笔记留在这里，v4 起不再写入
 ├── maps/                    # 暂不使用（v4 的目录树由应用实时生成，不落文件）
 ├── assets/                  # 截图、上传文件等原始素材
+├── mindmaps/                # 「我的导图」：使用者自己编辑的思维导图，一张一个 JSON（§8）
 └── .noteagent/              # 不进 git
     ├── index.db             # SQLite，派生物，可随时删除重建
     └── queue.db             # SQLite，录入队列（§2.7）。不是派生物：里面是还没处理的输入
@@ -1044,3 +1046,54 @@ CREATE TABLE embeddings (
 
 **窗口**:默认 1360×860,最小 1024×640,记住上次的大小、位置和是否最大化(上次的显示器不在了就居中)。
 笔记里的网址用系统浏览器打开;知识库里的素材(截图、PDF)在新窗口里打开。Ctrl + = / - / 0 缩放界面。
+
+---
+
+## 8. 我的导图
+
+使用者自己编辑整理的思维导图,和「目录导图」(界面按分类实时画、不落盘)是两回事。一张导图一个文件
+`mindmaps/<id>.json`,`id` 是 ULID。节点可以自由摆放,位置存在文件里;「自动排列」按树形重新摆一遍。
+
+```jsonc
+{
+  "version": 1,
+  "id": "01M5…", "title": "Transformer 复习",           // 标题 1–80 字
+  "created": "2026-10-20T10:00:00+08:00", "updated": "…",
+  "root": "root",
+  "nodes": {                                             // 最多 2000 个节点;节点 id 是 [A-Za-z0-9_-]{1,40}
+    "root": { "text": "Transformer", "children": ["a"], "x": 0, "y": 0 },
+    "a": {
+      "text": "多头注意力",                              // 最多 200 字
+      "children": [],                                    // 有顺序
+      "x": 220, "y": -40,                                // 节点左上角在画布上的位置
+      "color": "blue",                                   // 调色板里的名字或 null:blue teal green amber orange red pink violet
+      "note": "多个头并行……",                           // 备注,最多 5000 字,可空
+      "link": { "id": "01M4…", "title": "多头注意力机制" }, // 链到的笔记,可空
+      "collapsed": false                                 // 子节点是否收起
+    }
+  }
+}
+```
+
+- **必须是一棵树**:`root` 在 `nodes` 里,`children` 里的 id 都存在,每个节点只出现一次(没有环、没有两个父亲),
+  不在树上的节点不允许。不满足的保存请求返回 `422`。
+- **链接按笔记 `id` 认**,所以笔记改名不用改导图文件;`link.title` 是链上时的标题,笔记找不到时界面显示它并标成「已删除」。
+  一个节点最多链一条笔记,编辑节点时输入 `@` 选。
+- **git 提交**:新建、删除各提交一次;编辑时界面每改一下就自动保存,同一张导图最多每 10 分钟提交一次。
+- 不进 SQLite 索引,不参与检索和问答。
+
+### `GET /api/mindmaps` → `[{ "id", "title", "updated", "node_count" }]`
+
+最近改过的在前。读不了的文件跳过并记日志。
+
+### `POST /api/mindmaps` → `201 { "map": Mindmap, "notes": { id: NoteRef } }`
+
+请求体 `{ "title": "…" }` 建一张只有根节点(文字同标题)的导图;也可以带上 `root` 和 `nodes`(比如「从分类生成初稿」)。
+
+### `GET /api/mindmaps/{id}` / `PUT /api/mindmaps/{id}` → `{ "map": Mindmap, "notes": { id: NoteRef } }`
+
+`notes` 是导图里链到的笔记现在的样子(已经删掉的不在里面)。`PUT` 的请求体是 `{ "title", "root", "nodes" }`,
+整张替换,`updated` 由服务端写。不存在 `404`;id 不是 ULID `400`。
+
+### `DELETE /api/mindmaps/{id}` → `{ "deleted": true }`
+

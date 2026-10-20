@@ -32,6 +32,8 @@ from app.search.index import SearchIndex
 from app.search.vectors import VectorIndex
 from app.search.query import list_inbox, list_recent, refs_by_ids, search
 from app.settings_api import router as settings_router
+from app.mindmaps_api import build_router as build_mindmaps_router
+from app.vault.mindmaps import MindmapStore
 from app.vault.models import NoteRef, SourceKind, Taxonomy
 from app.vault.store import VaultStore
 from app.vault.taxonomy import TaxonomyManager
@@ -238,6 +240,7 @@ def create_app(
     app.state.vectors = vectors
 
     app.include_router(settings_router)
+    app.include_router(build_mindmaps_router(MindmapStore(root), index, root))
     app.include_router(build_organize_router(organizer, jobs))
 
     @app.get("/health")
