@@ -140,3 +140,70 @@
     scrollbar-color: color-mix(in oklab, var(--muted-foreground) 35%, transparent) transparent;
     }
 }
+
+/* 笔记正文的所见即所得编辑器（RichEditor）：和阅读区（NoteBody）长得一样 */
+@layer components {
+  .rich-editor {
+    @apply min-h-72 px-4 py-3 text-[14.5px] leading-[1.8] outline-none;
+  }
+  .rich-editor > * + * {
+    @apply mt-3;
+  }
+  .rich-editor h2 {
+    @apply mt-6 text-[11px] font-medium tracking-[0.14em] text-muted-foreground;
+  }
+  .rich-editor h3 {
+    @apply mt-4 font-semibold;
+  }
+  .rich-editor ul {
+    @apply list-disc pl-6;
+  }
+  .rich-editor ol {
+    @apply list-decimal pl-6;
+  }
+  .rich-editor li > p {
+    @apply my-0.5;
+  }
+  .rich-editor blockquote {
+    @apply border-l-2 border-input pl-3.5 text-muted-foreground;
+  }
+  .rich-editor code {
+    @apply rounded bg-muted px-1 font-mono text-[13px];
+  }
+  .rich-editor pre {
+    @apply overflow-x-auto rounded-lg border bg-muted/50 px-3.5 py-2.5 font-mono text-[13px] leading-relaxed;
+  }
+  .rich-editor pre code {
+    @apply bg-transparent p-0;
+  }
+  .rich-editor table {
+    @apply w-full border-collapse overflow-hidden rounded-lg border text-sm;
+  }
+  .rich-editor th,
+  .rich-editor td {
+    @apply border px-3 py-2 text-left align-top;
+  }
+  .rich-editor th {
+    @apply bg-pane font-medium;
+  }
+  .rich-editor .selectedCell {
+    @apply bg-accent;
+  }
+  .rich-editor .wikilink {
+    @apply rounded-md bg-accent px-1.5 py-0.5 text-accent-foreground;
+  }
+  .rich-editor .ProseMirror-selectednode.wikilink,
+  .rich-editor .ProseMirror-selectednode.embed {
+    @apply ring-2 ring-ring;
+  }
+  .rich-editor .embed img {
+    @apply max-w-full rounded-xl border;
+  }
+  .rich-editor .embed {
+    @apply text-sm text-muted-foreground;
+  }
+  .rich-editor p.is-editor-empty:first-child::before {
+    content: attr(data-placeholder);
+    @apply pointer-events-none float-left h-0 text-muted-foreground;
+  }
+}

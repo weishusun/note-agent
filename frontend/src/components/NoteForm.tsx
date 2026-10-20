@@ -1,4 +1,4 @@
-import { useId, useState, type FormEvent, type ReactNode } from "react"
+import { lazy, Suspense, useId, useState, type FormEvent, type ReactNode } from "react"
 
 import { Alert } from "@/components/Alert"
 import { Button } from "@/components/ui/button"
@@ -9,6 +9,9 @@ export interface NoteFormValues {
   aliases: string[]
   body: string
 }
+
+// 所见即所得编辑器有几百 KB：打开编辑时才加载，不拖慢应用启动
+const RichEditor = lazy(() => import("@/components/RichEditor").then((m) => ({ default: m.RichEditor })))
 
 const INPUT =
   "w-full rounded-lg border bg-background px-3 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
@@ -86,14 +89,10 @@ export function NoteForm({
         />
       </Field>
       {extra}
-      <Field id={ids.body} label="正文" hint="Markdown。用 [[笔记标题]] 链接到别的笔记。">
-        <textarea
-          id={ids.body}
-          className={INPUT + " resize-y py-2 font-mono leading-relaxed"}
-          rows={14}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-        />
+      <Field id={ids.body} label="正文" hint="输入 @ 链接到别的笔记。">
+        <Suspense fallback={<div className="h-80 rounded-lg border bg-background" />}>
+          <RichEditor id={ids.body} value={initial.body} onChange={setBody} />
+        </Suspense>
       </Field>
       {error && <Alert tone="error">{error}</Alert>}
       <div className="flex gap-2">
