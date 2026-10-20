@@ -134,3 +134,16 @@ def test_unreadable_files_are_skipped_in_the_list(vault_root: Path) -> None:
 def test_body_model_accepts_the_example() -> None:
     body = MindmapBody.model_validate(_body())
     assert len(body.nodes) == 4
+
+
+def test_titles_for_at_mentions(client: TestClient, note_id: str) -> None:
+    titles = client.get("/api/titles").json()
+    assert titles == [
+        {
+            "id": note_id,
+            "title": "RAG 检索增强生成",
+            "aliases": ["检索增强", "RAG"],
+            "type": "concept",
+            "path": "notes/RAG 检索增强生成.md",
+        }
+    ]

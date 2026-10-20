@@ -11,6 +11,8 @@ import re
 import sqlite3
 from collections.abc import Sequence
 
+from pydantic import BaseModel
+
 from app.search.index import SearchIndex
 from app.vault.models import NoteRef
 
@@ -419,3 +421,26 @@ def _recall_fts(conn: sqlite3.Connection, q: str, hits: dict[str, tuple[int, flo
         return  # 非法查询串（如过短、纯符号）视为无 FTS 命中
     for path, score in rows:
         _better(hits, path, _RANK_FTS, score)
+
+
+class NoteTitle(BaseModel):
+    """「@ 链接笔记」的候选：界面一次拿全，在前端按输入的字筛。"""
+
+    id: str
+    title: str
+    aliases: list[str]
+    type: str
+    path: str
+
+
+def note_titles(index: SearchIndex) -> list[NoteTitle]:
+    """全部未归档、有 id 的笔记的标题和别名，按标题排序。"""
+    with index.connect() as conn:
+        cursor = conn.execute(
+            "SELECT id, title, aliases, type, path FROM notes"
+            " WHERE status != 'archived' AND id IS NOT NULL ORDER BY title"
+        )
+        return [
+            NoteTitle(id=row[0], title=row[1], aliases=json.loads(row[2]), type=row[3], path=row[4])
+            for row in cursor
+        ]

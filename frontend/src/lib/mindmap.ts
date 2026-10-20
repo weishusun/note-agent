@@ -10,7 +10,7 @@ export interface MapNode {
   kind: MapKind
   label: string
   // 笔记节点才有：点它打开这条笔记
-  note?: { title: string; path: string }
+  note?: { title: string; path: string; id: string | null }
   // 分类节点下面一共有多少条笔记（含折叠起来的）
   count: number
   children: MapNode[]
@@ -24,7 +24,7 @@ function noteNode(note: GraphNode, children: MapNode[] = []): MapNode {
     key: `note:${note.path}`,
     kind: note.type,
     label: note.title,
-    note: { title: note.title, path: note.path },
+    note: { title: note.title, path: note.path, id: note.id },
     count: children.length,
     children,
   }

@@ -1,3 +1,5 @@
+import type { MindNode } from "@/lib/mindmapDoc"
+
 // 类型与 docs/SCHEMA.md 第 5 节一一对应
 
 export interface NoteRef {
@@ -114,6 +116,39 @@ export interface Graph {
 export interface Locations {
   vault: string
   settings: string
+}
+
+// 「我的导图」（SCHEMA §8）
+export interface MindmapSummary {
+  id: string
+  title: string
+  updated: string
+  node_count: number
+}
+
+export interface Mindmap {
+  version: 1
+  id: string
+  title: string
+  created: string
+  updated: string
+  root: string
+  nodes: Record<string, MindNode>
+}
+
+export interface MindmapView {
+  map: Mindmap
+  // 导图里链到的笔记现在的样子；已经删掉的不在里面
+  notes: Record<string, NoteRef>
+}
+
+// 「@ 链接笔记」的候选
+export interface NoteTitle {
+  id: string
+  title: string
+  aliases: string[]
+  type: NoteRef["type"]
+  path: string
 }
 
 // 设置页列出的服务商（backend/app/providers.yaml）
@@ -339,6 +374,15 @@ export const api = {
   reclassify: (scope: "unsorted" | "all") => post<{ job_id: string }>("/api/reclassify", { scope }),
 
   locations: () => request<Locations>("/api/locations"),
+  titles: () => request<NoteTitle[]>("/api/titles"),
+  mindmaps: () => request<MindmapSummary[]>("/api/mindmaps"),
+  mindmap: (id: string) => request<MindmapView>(`/api/mindmaps/${encodeURIComponent(id)}`),
+  createMindmap: (body: { title: string; root?: string; nodes?: Mindmap["nodes"] }) =>
+    post<MindmapView>("/api/mindmaps", body),
+  saveMindmap: (id: string, body: { title: string; root: string; nodes: Mindmap["nodes"] }) =>
+    send<MindmapView>("PUT", `/api/mindmaps/${encodeURIComponent(id)}`, body),
+  deleteMindmap: (id: string) =>
+    request<{ deleted: boolean }>(`/api/mindmaps/${encodeURIComponent(id)}`, { method: "DELETE" }),
   providers: () => request<ProviderInfo[]>("/api/providers"),
   // 用这家的 Key 问它有哪些模型（顺便验证 Key），不保存。不带 Key 就用已保存的
   providerModels: (provider: string, body: { api_key?: string; base_url?: string } = {}) =>

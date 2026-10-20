@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from "react"
 import {
+  BrainCircuitIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -79,7 +80,8 @@ export function Sidebar({
         />
         <NavItem icon={<MessageCircleIcon />} label="提问" active={page === "ask"} onClick={() => onPage("ask")} />
         <NavItem icon={<WaypointsIcon />} label="图谱" active={page === "graph"} onClick={() => onPage("graph")} />
-        <NavItem icon={<NetworkIcon />} label="导图" active={page === "map"} onClick={() => onPage("map")} />
+        <NavItem icon={<NetworkIcon />} label="目录导图" active={page === "map"} onClick={() => onPage("map")} />
+        <NavItem icon={<BrainCircuitIcon />} label="我的导图" active={page === "mindmaps"} onClick={() => onPage("mindmaps")} />
       </nav>
 
       <div className="flex items-center px-6 pt-5 pb-1.5">

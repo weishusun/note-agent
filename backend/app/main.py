@@ -30,7 +30,7 @@ from app.organize.supplement import BatchScope, Supplementer
 from app.search.graph import Graph, note_graph
 from app.search.index import SearchIndex
 from app.search.vectors import VectorIndex
-from app.search.query import list_inbox, list_recent, refs_by_ids, search
+from app.search.query import NoteTitle, list_inbox, list_recent, note_titles, refs_by_ids, search
 from app.settings_api import router as settings_router
 from app.mindmaps_api import build_router as build_mindmaps_router
 from app.vault.mindmaps import MindmapStore
@@ -359,6 +359,11 @@ def create_app(
     @app.get("/api/graph")
     def api_graph(category: str | None = None) -> Graph:
         return note_graph(index, category or None)
+
+    @app.get("/api/titles")
+    def api_titles() -> list[NoteTitle]:
+        """全部笔记的标题和别名：编辑导图、正文时输入 @ 选笔记用（SCHEMA §8）。"""
+        return note_titles(index)
 
     @app.get("/api/notes")
     def api_notes(

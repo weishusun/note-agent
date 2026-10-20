@@ -9,16 +9,17 @@ export interface Transform {
 const MIN_SCALE = 0.15
 const MAX_SCALE = 4
 
-// 给一块 SVG 画布加上「拖动空白处平移、滚轮缩放」。关系图谱和思维导图共用。
-// 内容画在 <g transform={`translate(x,y) scale(k)`}> 里；toWorld 把屏幕坐标换算回内容坐标。
-export function usePanZoom(svg: RefObject<SVGSVGElement | null>) {
+// 给一块画布加上「拖动空白处平移、滚轮缩放」。关系图谱、目录导图（SVG）和我的导图（HTML）共用。
+// 内容画在 translate(x,y) scale(k) 的一层里；toWorld 把屏幕坐标换算回内容坐标。
+export function usePanZoom(svg: RefObject<HTMLElement | SVGSVGElement | null>) {
   const [transform, setTransform] = useState<Transform>({ x: 0, y: 0, k: 1 })
   const current = useRef(transform)
   current.current = transform
   const pan = useRef<{ startX: number; startY: number; x: number; y: number } | null>(null)
 
   useEffect(() => {
-    const element = svg.current
+    // SVG 和 HTML 元素的 addEventListener 类型合不到一起，按 HTMLElement 用（滚轮事件两边都一样）
+    const element = svg.current as HTMLElement | null
     if (!element) return
     // React 的 onWheel 是 passive 的，拦不住页面跟着滚动，所以用原生监听
     const onWheel = (e: WheelEvent) => {
@@ -85,9 +86,9 @@ export function usePanZoom(svg: RefObject<SVGSVGElement | null>) {
     [svg],
   )
 
-  // 绑在 <svg> 上：在空白处按下开始平移
+  // 绑在画布上：在空白处按下开始平移
   const panHandlers = {
-    onPointerDown: (e: PointerEvent<SVGSVGElement>) => {
+    onPointerDown: (e: PointerEvent<Element>) => {
       if (e.button !== 0) return
       try {
         e.currentTarget.setPointerCapture(e.pointerId)
@@ -97,7 +98,7 @@ export function usePanZoom(svg: RefObject<SVGSVGElement | null>) {
       const t = current.current
       pan.current = { startX: e.clientX, startY: e.clientY, x: t.x, y: t.y }
     },
-    onPointerMove: (e: PointerEvent<SVGSVGElement>) => {
+    onPointerMove: (e: PointerEvent<Element>) => {
       const start = pan.current
       if (!start) return
       setTransform((t) => ({

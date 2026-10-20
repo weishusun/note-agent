@@ -7,6 +7,7 @@ import { DuplicateDialog } from "@/components/DuplicateDialog"
 import { GraphView } from "@/components/GraphView"
 import { IngestPanel } from "@/components/IngestPanel"
 import { MindMapView } from "@/components/MindMapView"
+import { MyMindmapsPage } from "@/components/MyMindmapsPage"
 import { NoteDrawer } from "@/components/NoteDrawer"
 import { NotesPage } from "@/components/NotesPage"
 import { SettingsPanel } from "@/components/SettingsPanel"
@@ -27,6 +28,11 @@ const TOAST_MS = 6000
 
 function App() {
   const [page, setPage] = useState<Page>("notes")
+  // 我的导图第一次打开之后一直挂着：切到别的页面再回来，正在编辑的那张还在
+  const [mindmapsVisited, setMindmapsVisited] = useState(false)
+  useEffect(() => {
+    if (page === "mindmaps") setMindmapsVisited(true)
+  }, [page])
   const [selection, setSelection] = useState<Selection>({ kind: "all" })
   const [tree, setTree] = useState<Tree | null>(null)
   // 笔记有改动（编辑、删除、改分类、录入完成、处理疑似重复）的次数：各页据此重新加载
@@ -226,9 +232,22 @@ function App() {
             </Canvas>
           )}
           {page === "map" && (
-            <Canvas title="导图" scope={scopeLabel}>
+            <Canvas title="目录导图" scope={scopeLabel}>
               <MindMapView tree={tree} category={scope} version={notesVersion} onOpenNote={openNote} />
             </Canvas>
+          )}
+          {mindmapsVisited && (
+            <div hidden={page !== "mindmaps"} className="h-full">
+              <div className="flex h-full flex-col gap-4 px-8 pt-7 pb-6">
+                <div className="flex items-baseline gap-3">
+                  <h1 className="font-heading text-[26px]">我的导图</h1>
+                  <span className="text-sm text-muted-foreground">自己做的思维导图，节点可以用 @ 链到笔记</span>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <MyMindmapsPage tree={tree} version={notesVersion} onOpenNote={openNote} />
+                </div>
+              </div>
+            </div>
           )}
           {page === "settings" && (
             <Column title="设置" lead="模型服务商、密钥和各环节用的模型。">

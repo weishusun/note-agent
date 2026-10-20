@@ -9,7 +9,8 @@ export type Selection =
   | { kind: "duplicates" }
   | { kind: "category"; path: string }
 
-export type Page = "notes" | "ingest" | "ask" | "graph" | "map" | "settings"
+// map：目录导图（按分类自动画）；mindmaps：我的导图（自己编辑）
+export type Page = "notes" | "ingest" | "ask" | "graph" | "map" | "mindmaps" | "settings"
 
 // 图谱和导图只认「全部」和某个分类；待整理、疑似重复不是分类，在那两页里当作全部
 export function scopeOf(selection: Selection): string | null {
