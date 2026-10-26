@@ -230,6 +230,8 @@ export interface VectorStatus {
   model: string | null
   total: number
   embedded: number
+  // false：这家这个模型的相似度门槛没实测过，用的是默认值，检索和查重可能不准
+  calibrated: boolean
 }
 
 export interface ProbeResult {

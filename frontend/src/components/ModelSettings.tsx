@@ -327,6 +327,12 @@ export function ModelSettings({ settingsPath }: { settingsPath: string | null })
                 {vectors.embedded < vectors.total ? "，其余的正在后台计算…" : "。"}
               </p>
             )}
+            {vectors?.enabled && !vectors.calibrated && (
+              <Alert tone="info">
+                {"这个向量模型的相似度门槛还没实测过，暂用默认值：问答可能带回不太相关的笔记、或漏掉相关的，录入查重也可能不准。" +
+                  "各家模型的相似度尺度差得很远，需要实测后写进 providers.yaml。"}
+              </Alert>
+            )}
 
             <details className="group rounded-lg border px-3 py-2">
               <summary className="cursor-pointer text-sm text-muted-foreground select-none">高级</summary>
