@@ -2,10 +2,11 @@
 
 检索是字面和向量两路合并（app/search/hybrid.py）；向量那一路不可用时只剩字面检索，问答照常。
 追问时先结合上文把问题改写成一句完整的话再去检索（app/ask/expand.py），回答时把上文一并交给模型。
+回答是流式生成的（ask_events）：检索完先交出来源，回答一段一段地交；answer_question 是收拢成一次返回的版本。
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -13,9 +14,8 @@ from pydantic import BaseModel
 
 from app.ask.expand import Turn, expand_question, rewrite_question
 from app.extract.client import get_answer_model
-from app.search.hybrid import retrieve
+from app.search.hybrid import retrieve, vocabulary
 from app.search.index import SearchIndex
-from app.search.query import note_vocabulary
 from app.search.vectors import VectorIndex
 from app.vault.models import NoteRef
 from app.vault.store import VaultStore
@@ -47,16 +47,48 @@ def answer_question(
     vectors: VectorIndex | None = None,
     history: Sequence[Turn] = (),
 ) -> AskResult:
+    """一次答完：把 ask_events 的事件收拢成一个结果。"""
+    found: dict = {}
+    for event, data in ask_events(store, index, question, limit, vectors, history):
+        if event == "sources":
+            found = data
+        elif event == "done":
+            return AskResult(answer=data["answer"], **found)
+    raise RuntimeError("问答没有正常结束")
+
+
+def ask_events(
+    store: VaultStore,
+    index: SearchIndex,
+    question: str,
+    limit: int = 5,
+    vectors: VectorIndex | None = None,
+    history: Sequence[Turn] = (),
+) -> Iterator[tuple[str, dict]]:
+    """边检索边作答，依次产出 (事件名, 数据)：sources 一次，delta 若干次，最后 done（SCHEMA §5 POST /api/ask/stream）。
+
+    模型调用失败时直接抛异常，由调用方决定怎么告诉界面。
+    """
     question = question.strip()
-    vocabulary = note_vocabulary(index)
+    history = list(history)
+    # 挑词表用的那句话：追问时单看这一问不知道在说什么，带上上一问
+    probe = f"{history[-1].question.strip()} {question}" if history else question
+    query = vectors.embed_query(probe) if vectors is not None else None
+    words = vocabulary(index, vectors, query)
     if history:
-        search_for, keywords = rewrite_question(question, history, vocabulary)
+        search_for, keywords = rewrite_question(question, history, words)
+        if query is not None and search_for != probe:
+            again = vectors.embed_query(search_for)  # type: ignore[union-attr]
+            if again is not None:
+                query = again
     else:
-        search_for, keywords = question, expand_question(question, vocabulary)
+        search_for, keywords = question, expand_question(question, words)
+    # 问题的向量没算出来就不再去算第二次：接口多半还是不通，白等一个超时
+    usable = vectors if query is not None else None
 
     sources: list[NoteRef] = []
     blocks: list[str] = []
-    for ref in retrieve(index, vectors, search_for, limit, keywords=keywords):
+    for ref in retrieve(index, usable, search_for, limit, keywords=keywords, query=query):
         try:
             note = store.read_note(ref.path)
         except (FileNotFoundError, ValueError):
@@ -68,23 +100,28 @@ def answer_question(
             f"[{len(sources)}] {note.frontmatter.title}\n"
             f"概要：{note.frontmatter.summary}\n{note.body.strip()}"
         )
+    yield "sources", {
+        "sources": sources,
+        "grounded": bool(sources),
+        "keywords": keywords,
+        "rewritten": search_for if history and search_for != question else None,
+    }
 
     notes_text = "\n\n".join(blocks) if blocks else "(没有检索到任何笔记)"
     messages: list = [SystemMessage(content=_PROMPT_PATH.read_text(encoding="utf-8"))]
-    for turn in list(history)[-HISTORY_TURNS:]:
+    for turn in history[-HISTORY_TURNS:]:
         messages.append(HumanMessage(content=turn.question.strip()))
         messages.append(AIMessage(content=_past_answer(turn.answer)))
     messages.append(
         HumanMessage(content=f"# 知识库笔记\n\n{notes_text}\n\n# 问题\n\n{question}")
     )
-    reply = get_answer_model().invoke(messages)
-    return AskResult(
-        answer=_drop_dangling_citations(_text(reply.content), len(sources)),
-        sources=sources,
-        grounded=bool(sources),
-        keywords=keywords,
-        rewritten=search_for if history and search_for != question else None,
-    )
+    pieces: list[str] = []
+    for chunk in get_answer_model().stream(messages):
+        text = _text(chunk.content)
+        if text:
+            pieces.append(text)
+            yield "delta", {"text": text}
+    yield "done", {"answer": _drop_dangling_citations("".join(pieces).strip(), len(sources))}
 
 
 # 前面紧挨着字母数字的不算引用：那是 arr[0] 这样的代码
@@ -107,8 +144,8 @@ def _past_answer(answer: str) -> str:
 
 
 def _text(content: object) -> str:
-    """content 通常是 str；个别模型返回分段列表，只取文本段。"""
+    """content 通常是 str；个别模型返回分段列表，只取文本段。流式的一段段文字原样拼接，不去空白。"""
     if isinstance(content, str):
-        return content.strip()
+        return content
     parts = [p.get("text", "") for p in content if isinstance(p, dict)]  # type: ignore[union-attr]
-    return "".join(parts).strip()
+    return "".join(parts)

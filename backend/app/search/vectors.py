@@ -220,6 +220,15 @@ class VectorIndex:
     def vector_of(self, path: str) -> array | None:
         return self._vectors().get(path)
 
+    def unembedded(self, limit: int) -> list[str]:
+        """最近更新、还没有当前模型向量的笔记（刚录入、或者上次没算出来的），新的在前。"""
+        have = self._vectors()
+        with self.index.connect() as conn:
+            rows = conn.execute(
+                "SELECT path FROM notes WHERE status != 'archived' ORDER BY updated DESC, path"
+            ).fetchall()
+        return [path for (path,) in rows if path not in have][:limit]
+
     def _vectors(self) -> dict[str, array]:
         model = self.model() or ""
         with self._lock:

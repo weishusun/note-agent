@@ -6,10 +6,11 @@
 """
 
 import math
+from array import array
 from collections.abc import Sequence
 
 from app.search.index import SearchIndex
-from app.search.query import refs_by_paths, retrieve_ranked
+from app.search.query import note_vocabulary, refs_by_paths, retrieve_ranked
 from app.search.vectors import VectorIndex
 from app.vault.models import NoteRef
 
@@ -23,6 +24,21 @@ VECTOR_MIN_SCORE = 0.33
 VECTOR_MARGIN = 0.12
 # 名次合并（RRF）里的常数：越大，名次靠前的优势越小。60 是通用的取值
 _RRF_K = 60
+# 检索词扩展的词表：和问题最接近的这么多条，加上至多这么多条还没有向量的新笔记
+VOCABULARY_NEIGHBORS = 40
+VOCABULARY_UNEMBEDDED = 20
+
+
+def vocabulary(index: SearchIndex, vectors: VectorIndex | None, query: array | None) -> list[str]:
+    """给检索词扩展当参照的笔记标题。有问题的向量时按意思挑，没有时退回最近更新的。"""
+    if vectors is None or query is None:
+        return note_vocabulary(index)
+    near = [path for path, _score in vectors.search(query, VOCABULARY_NEIGHBORS)]
+    return note_vocabulary(
+        index,
+        limit=VOCABULARY_NEIGHBORS + VOCABULARY_UNEMBEDDED,
+        paths=near + vectors.unembedded(VOCABULARY_UNEMBEDDED),
+    )
 
 
 def retrieve(
@@ -31,11 +47,16 @@ def retrieve(
     question: str,
     limit: int = 5,
     keywords: Sequence[str] = (),
+    query: array | None = None,
 ) -> list[NoteRef]:
-    """返回与 question 最相关的至多 limit 条笔记，最相关的在前。"""
+    """返回与 question 最相关的至多 limit 条笔记，最相关的在前。
+
+    query 是 question 已经算好的向量（挑词表时算过了），不给就在这里算。
+    """
     pool = max(limit * 2, 10)
     ranked = retrieve_ranked(index, question, pool, keywords=keywords)
-    query = vectors.embed_query(question) if vectors is not None else None
+    if vectors is not None and query is None:
+        query = vectors.embed_query(question)
     if vectors is None or query is None:
         return [ref for ref, _weak in ranked[:limit]]
 

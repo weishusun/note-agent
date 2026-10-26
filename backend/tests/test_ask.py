@@ -1,5 +1,6 @@
 """问答：问句召回（retrieve_for_question）与 POST /api/ask。模型调用打桩。"""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,11 +56,18 @@ class FakeModel:
         self.messages: list | None = None
         self.error: Exception | None = None
 
-    def invoke(self, messages):
+    def stream(self, messages):
+        """回答分两段吐出来；列表形式的 content 整个当一段。"""
         self.messages = messages
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(content=self.reply)
+        if isinstance(self.reply, str):
+            middle = len(self.reply) // 2
+            yield SimpleNamespace(content=self.reply[:middle])
+            yield SimpleNamespace(content="")  # 真实接口的流里也有空段
+            yield SimpleNamespace(content=self.reply[middle:])
+        else:
+            yield SimpleNamespace(content=self.reply)
 
 
 class FakeExpander:
@@ -209,6 +217,12 @@ def test_note_vocabulary_lists_titles_with_aliases(store: VaultStore, index: Sea
     # 与标题相同的别名不重复列出；archived 不参与
     assert sorted(note_vocabulary(index)) == ["LoRA（Low-Rank Adaptation）", "预训练"]
     assert len(note_vocabulary(index, limit=1)) == 1
+
+    # 指定了哪几条：照给的顺序，重复的、不存在的、已归档的跳过
+    paths = ["notes/预训练.md", "notes/不存在.md", archived.path.as_posix(), "notes/LoRA.md", "notes/预训练.md"]
+    assert note_vocabulary(index, paths=paths) == ["预训练", "LoRA（Low-Rank Adaptation）"]
+    assert note_vocabulary(index, limit=1, paths=paths) == ["预训练"]
+    assert note_vocabulary(index, paths=[]) == []
 
 
 def test_expansion_sees_the_vault_vocabulary(
@@ -426,3 +440,50 @@ def test_citations_that_point_at_no_note_are_removed(client: TestClient, model: 
     data = client.post("/api/ask", json={"question": "RAG 和微调有什么区别？"}).json()
     assert len(data["sources"]) == 2
     assert data["answer"] == "RAG 先检索 [1]，微调改模型 [2]，蒸馏另说。"
+
+
+# ---------- 流式 ----------
+
+
+def _events(resp) -> list[tuple[str, dict]]:
+    """把 text/event-stream 的响应拆成 [(事件名, 数据)]。"""
+    events = []
+    for block in resp.text.strip().split("\n\n"):
+        fields = dict(line.split(": ", 1) for line in block.splitlines())
+        events.append((fields["event"], json.loads(fields["data"])))
+    return events
+
+
+def test_stream_sends_the_sources_first_then_the_answer_piece_by_piece(
+    client: TestClient, model: FakeModel, expander: FakeExpander
+) -> None:
+    expander.keywords = ["微调"]
+    model.reply = "  RAG 先检索 [1]，微调改模型 [2]，蒸馏另说 [3]。"
+    resp = client.post("/api/ask/stream", json={"question": "RAG 和微调有什么区别？"})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    events = _events(resp)
+    assert [name for name, _ in events] == ["sources", "delta", "delta", "done"]
+
+    sources = events[0][1]
+    assert {s["title"] for s in sources["sources"]} == {"RAG 检索增强生成", "模型微调"}
+    assert (sources["grounded"], sources["keywords"], sources["rewritten"]) == (True, ["微调"], None)
+    # 拼起来是模型的原话；done 里是处理过的：去掉首尾空白和对不上的 [3]
+    assert "".join(data["text"] for name, data in events if name == "delta") == model.reply
+    assert events[-1][1] == {"answer": "RAG 先检索 [1]，微调改模型 [2]，蒸馏另说。"}
+
+
+def test_stream_reports_a_model_failure_as_an_error_event(client: TestClient, model: FakeModel) -> None:
+    model.error = RuntimeError("401 Unauthorized")
+    resp = client.post("/api/ask/stream", json={"question": "RAG 和微调有什么区别？"})
+
+    assert resp.status_code == 200  # 已经开始发了，状态码改不了
+    events = _events(resp)
+    assert [name for name, _ in events] == ["sources", "error"]
+    assert "401 Unauthorized" in events[-1][1]["detail"]
+
+
+def test_stream_rejects_invalid_requests_before_starting(client: TestClient, model: FakeModel) -> None:
+    assert client.post("/api/ask/stream", json={"question": "  "}).status_code == 422
+    assert model.messages is None

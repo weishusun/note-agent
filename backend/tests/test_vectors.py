@@ -8,14 +8,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import settings
+from app.ask import answer, expand
+from app.ask.answer import answer_question
+from app.ask.expand import Turn
 from app.extract import client
 from app.main import create_app
+from app.search import hybrid
 from app.search import vectors as vectors_module
-from app.search.hybrid import retrieve
+from app.search.hybrid import retrieve, vocabulary
 from app.search.index import SCHEMA_VERSION, SearchIndex
 from app.search.vectors import VectorIndex, embedding_text, normalize
 from app.vault.store import VaultStore
 from tests.conftest import make_note
+from tests.test_ask import FakeExpander, FakeModel
 
 # 假的向量空间：每一维是一个「意思」。文字里出现哪些词，就在对应的维度上有分量——
 # 所以「监督微调」和「教模型听指令」方向相同，尽管没有一个字相同
@@ -332,3 +337,74 @@ def test_api_vectors_status_and_settings(
         "total": 1,
         "embedded": 1,
     }
+
+
+# ---------- 检索词扩展的词表 ----------
+
+
+@pytest.fixture
+def asking(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeExpander, FakeModel]:
+    expander, model = FakeExpander(), FakeModel()
+    monkeypatch.setattr(expand, "get_expand_model", lambda override=None: expander)
+    monkeypatch.setattr(answer, "get_answer_model", lambda override=None: model)
+    return expander, model
+
+
+def test_vocabulary_is_picked_by_meaning(
+    store: VaultStore, index: SearchIndex, vectors: VectorIndex, embedder: Embedder,
+    notes, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hybrid, "VOCABULARY_NEIGHBORS", 1)
+    query = vectors.embed_query("怎么教模型听指令")
+    assert vocabulary(index, vectors, query) == ["SFT"]
+
+    # 向量还没算出来的新笔记也列上：不能因为向量没算好就看不见刚录入的笔记
+    embedder.error = RuntimeError("限流")
+    _add(store, index, "红烧肉", "一道家常菜。")
+    assert vectors.wait_idle()
+    assert vocabulary(index, vectors, query) == ["SFT", "红烧肉"]
+
+    # 没有问题的向量：退回最近更新的
+    assert set(vocabulary(index, vectors, None)) == {"SFT", "快速排序", "RAG", "红烧肉"}
+    assert set(vocabulary(index, None, None)) == {"SFT", "快速排序", "RAG", "红烧肉"}
+
+
+def test_ask_embeds_the_question_once_and_shows_the_nearest_titles(
+    store: VaultStore, index: SearchIndex, vectors: VectorIndex, embedder: Embedder,
+    notes, asking, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expander, _model = asking
+    monkeypatch.setattr(hybrid, "VOCABULARY_NEIGHBORS", 1)
+    result = answer_question(store, index, "怎么教模型听指令", vectors=vectors)
+
+    assert embedder.calls == [["怎么教模型听指令"]]  # 挑词表和向量检索用的是同一个向量
+    assert "- SFT" in expander.prompts[0] and "快速排序" not in expander.prompts[0]
+    assert [r.title for r in result.sources] == ["SFT"]
+
+
+def test_follow_up_vocabulary_uses_the_previous_question_too(
+    store: VaultStore, index: SearchIndex, vectors: VectorIndex, embedder: Embedder,
+    notes, asking,
+) -> None:
+    expander, _model = asking
+    history = [Turn(question="什么是 SFT", answer="监督微调 [1]。")]
+    expander.rewritten = "SFT 和外部资料检索有什么关系"
+    answer_question(store, index, "它和检索有什么关系", vectors=vectors, history=history)
+    # 先按「上一问 + 这一问」挑词表，改写之后按改写出来的那句话检索
+    assert embedder.calls == [["什么是 SFT 它和检索有什么关系"], ["SFT 和外部资料检索有什么关系"]]
+
+    # 改写失败：退回的就是「上一问 + 这一问」，不用再算一次
+    embedder.calls.clear()
+    expander.error = RuntimeError("超时")
+    answer_question(store, index, "它和检索有什么关系", vectors=vectors, history=history)
+    assert embedder.calls == [["什么是 SFT 它和检索有什么关系"]]
+
+
+def test_ask_does_not_retry_an_embedding_that_failed(
+    store: VaultStore, index: SearchIndex, vectors: VectorIndex, embedder: Embedder,
+    notes, asking,
+) -> None:
+    embedder.error = RuntimeError("超时")
+    result = answer_question(store, index, "RAG 是什么", vectors=vectors)
+    assert len(embedder.calls) == 1  # 再算一次多半还是超时，白等
+    assert [r.title for r in result.sources] == ["RAG"]  # 字面检索照常

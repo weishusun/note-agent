@@ -190,17 +190,31 @@ def list_recent(
         return [_to_ref(row) for row in _dict_rows(cursor)]
 
 
-def note_vocabulary(index: SearchIndex, limit: int = 200) -> list[str]:
-    """知识库的「词表」：最近更新的若干条笔记的标题，别名附在括号里。
+def note_vocabulary(
+    index: SearchIndex, limit: int = 200, paths: Sequence[str] | None = None
+) -> list[str]:
+    """知识库的「词表」：笔记的标题，别名附在括号里。
 
     给检索词扩展当参照——模型不知道库里用的是哪些词，就只能凭空猜同义词。
+    不给 paths 时是最近更新的 limit 条；给了就是这几条，顺序照 paths，不存在的、已归档的跳过。
     """
     with index.connect() as conn:
-        rows = conn.execute(
-            "SELECT title, aliases FROM notes WHERE status != 'archived'"
-            " ORDER BY updated DESC, path LIMIT ?",
-            (limit,),
-        ).fetchall()
+        if paths is None:
+            rows = conn.execute(
+                "SELECT title, aliases FROM notes WHERE status != 'archived'"
+                " ORDER BY updated DESC, path LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            found = {
+                path: (title, aliases)
+                for path, title, aliases in conn.execute(
+                    "SELECT path, title, aliases FROM notes WHERE status != 'archived'"
+                    f" AND path IN ({','.join('?' * len(paths))})",
+                    list(paths),
+                )
+            }
+            rows = [found[path] for path in dict.fromkeys(paths) if path in found][:limit]
     entries: list[str] = []
     for title, aliases_json in rows:
         aliases = [a for a in json.loads(aliases_json) if a != title]

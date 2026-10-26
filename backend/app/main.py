@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import mimetypes
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,11 +12,11 @@ from pathlib import Path, PurePath
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app import settings as app_settings
-from app.ask.answer import AskResult, answer_question
+from app.ask.answer import AskResult, answer_question, ask_events
 from app.ask.expand import Turn
 from app.config import default_vault_root
 from app.ingest.jobs import JobRegistry, JobState, Progress
@@ -49,6 +49,16 @@ class IngestRequest(BaseModel):
     filename: str | None = None
     url: str | None = None
     force: bool = False
+
+
+def _sse(event: str, data: dict) -> str:
+    """一个 server-sent event。NoteRef 之类的 pydantic 对象先转成普通的 dict。"""
+    payload = json.dumps(
+        data,
+        ensure_ascii=False,
+        default=lambda obj: obj.model_dump(mode="json") if isinstance(obj, BaseModel) else str(obj),
+    )
+    return f"event: {event}\ndata: {payload}\n\n"
 
 
 class AskRequest(BaseModel):
@@ -355,6 +365,23 @@ def create_app(
         except Exception as exc:
             logger.exception("问答失败")
             raise HTTPException(status_code=502, detail=f"模型调用失败: {exc}")
+
+    @app.post("/api/ask/stream")
+    def api_ask_stream(req: AskRequest) -> StreamingResponse:
+        def events() -> Iterator[str]:
+            try:
+                for event, data in ask_events(
+                    store, index, req.question, limit=req.limit, vectors=vectors, history=req.history
+                ):
+                    yield _sse(event, data)
+            except Exception as exc:
+                # 响应头已经发出去了，没法再改成 502：用 error 事件告诉界面
+                logger.exception("问答失败")
+                yield _sse("error", {"detail": f"模型调用失败: {exc}"})
+
+        # 不让中间的代理攒着不发：一个字一个字出来才有意义
+        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
 
     @app.get("/api/graph")
     def api_graph(category: str | None = None) -> Graph:
