@@ -13,6 +13,9 @@
 #   verified     是否在本项目里用真实接口测过。false 的推荐模型是按各家文档整理的（2026-10），可能已经改名
 #   models       推荐模型，第一个是默认值：vision 看图提取，text 分类/整理/问答，embed 向量检索。
 #                某项为空表示这家没有这类模型，这一环要另选一家
+#   embed_thresholds  实测过的向量模型的相似度门槛（floor 问答下限 / margin 比第一名差多少就不要 / duplicate 查重候选下限）。
+#                各家模型的相似度尺度差得很远，不能照搬。用 `uv run python -m evals.thresholds` 实测后填；
+#                没写的模型用默认值（0.33 / 0.12 / 0.55），设置页会提示「未校准」
 
 providers:
   - id: zhipu
@@ -28,6 +31,10 @@ providers:
       vision: [glm-4.6v, glm-4.6v-flash]
       text: [glm-4.5-air, glm-4.6]
       embed: [embedding-3]
+    # 2026-10-26 实测（evals/thresholds.py）。embedding-2 用默认的查重门槛会漏掉 8 对同一概念里的 3 对
+    embed_thresholds:
+      embedding-3: {floor: 0.33, margin: 0.12, duplicate: 0.55}
+      embedding-2: {floor: 0.30, margin: 0.12, duplicate: 0.42}
 
   - id: deepseek
     name: DeepSeek

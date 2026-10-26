@@ -827,6 +827,18 @@ def test_differently_named_note_about_the_same_concept_is_flagged(
     assert client.get("/api/tree").json()["duplicates"] == 1
 
 
+def test_duplicate_candidates_use_the_threshold_of_the_embedding_model(
+    client: TestClient, stubs: Stubs, similarity: Similarity, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ingest_concepts(client, stubs, "第一次", _concept("SFT"))
+    similarity.judged.clear()
+    strict = settings.EmbedThresholds(floor=0.33, margin=0.12, duplicate=1.5)
+    monkeypatch.setattr(vectors_module.VectorIndex, "thresholds", staticmethod(lambda: strict))
+    [new] = _ingest_concepts(client, stubs, "第二次", _concept("有监督微调"))
+    # 在这个模型的尺度上算不上接近：不去问模型
+    assert similarity.judged == [] and new["duplicate_of"] is None
+
+
 def test_similar_but_different_concept_is_not_flagged(
     client: TestClient, stubs: Stubs, similarity: Similarity
 ) -> None:

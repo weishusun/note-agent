@@ -28,6 +28,9 @@ TEXT_MAX_CHARS = 1800
 SYNC_DELAY_SECONDS = 1.0
 # 这些区块里是链接列表和原始输入的引用，不是这条笔记自己的内容
 _SKIPPED_SECTIONS = ("## 原始输入", "## 关联", "## 概念")
+# providers.yaml 里没实测过的向量模型用这组门槛：对着智谱的向量模型定的。
+# 各家模型的相似度尺度差得很远（同一家的新旧两个模型，查重门槛就差了 0.13），新模型请用 evals/thresholds.py 实测
+DEFAULT_THRESHOLDS = settings.EmbedThresholds(floor=0.33, margin=0.12, duplicate=0.55)
 
 
 def embedding_text(title: str, aliases: list[str], summary: str, body: str) -> str:
@@ -81,9 +84,15 @@ class VectorIndex:
     def enabled(self) -> bool:
         return self.model() is not None
 
+    @staticmethod
+    def thresholds() -> settings.EmbedThresholds:
+        """当前向量模型的相似度门槛：实测过的用实测值，否则用默认值。"""
+        return settings.load().embed_thresholds() or DEFAULT_THRESHOLDS
+
     def status(self) -> dict[str, object]:
-        """给设置页看：配了哪个模型、多少条笔记已经有（当前模型算的）向量。"""
-        model = self.model()
+        """给设置页看：配了哪个模型、多少条笔记已经有（当前模型算的）向量、门槛是不是对这个模型实测过的。"""
+        current = settings.load()
+        model = current.embed_model or None
         with self.index.connect() as conn:
             total = conn.execute("SELECT COUNT(*) FROM notes WHERE status != 'archived'").fetchone()[0]
             embedded = conn.execute(
@@ -91,7 +100,13 @@ class VectorIndex:
                 " WHERE n.status != 'archived' AND e.model = ?",
                 (model or "",),
             ).fetchone()[0]
-        return {"enabled": model is not None, "model": model, "total": total, "embedded": embedded}
+        return {
+            "enabled": model is not None,
+            "model": model,
+            "total": total,
+            "embedded": embedded,
+            "calibrated": current.embed_thresholds() is not None,
+        }
 
     # ---------- 写入 ----------
 

@@ -64,6 +64,28 @@ def test_catalog_lists_the_providers() -> None:
     assert settings.provider_info("deepseek").models["embed"] == []
     assert settings.provider_for_url("https://open.bigmodel.cn/api/paas/v4") == "zhipu"
     assert settings.provider_for_url("https://example.com/v1") is None
+    # 实测过的向量门槛：数值要在合理范围内，只给这家真有的向量模型写
+    for p in settings.catalog():
+        for model, t in p.embed_thresholds.items():
+            assert 0 < t.floor < t.duplicate < 1 and 0 < t.margin < 0.5, (p.id, model)
+
+
+def test_embed_thresholds_are_looked_up_by_provider_and_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    measured = settings.EmbedThresholds(floor=0.3, margin=0.1, duplicate=0.4)
+    monkeypatch.setitem(settings.provider_info("zhipu").embed_thresholds, "fake-embed", measured)
+    assert settings.load().embed_thresholds() is None  # 还没配向量模型
+
+    settings.save({"embed": {"model": "fake-embed"}})
+    assert settings.load().embed_thresholds() == measured  # 只连了一家（.env 里的智谱）：没选服务商也认得
+    settings.save({"embed": {"model": "other-embed"}})
+    assert settings.load().embed_thresholds() is None  # 没实测过的模型
+    settings.save(
+        {
+            "providers": {"deepseek": {"api_key": "ds-key-55556666"}},
+            "embed": {"provider": "deepseek", "model": "fake-embed"},
+        }
+    )
+    assert settings.load().embed_thresholds() is None  # 同名的模型，在别家没实测过
 
 
 def test_get_providers(client: TestClient) -> None:

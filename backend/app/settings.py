@@ -47,6 +47,14 @@ _LEGACY_KEYS = ("base_url", "api_key", "extract_model", "classify_model", "answe
 # ---------- 服务商清单（providers.yaml） ----------
 
 
+class EmbedThresholds(BaseModel):
+    """一个向量模型的相似度门槛。各家模型的相似度尺度差得很远，要对着模型实测（evals/thresholds.py）。"""
+
+    floor: float  # 问答：向量命中至少要这么像
+    margin: float  # 问答：比第一名差这么多以上的不要
+    duplicate: float  # 录入查重：至少这么像才拿去问模型是不是同一个概念
+
+
 class ProviderInfo(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -60,6 +68,8 @@ class ProviderInfo(BaseModel):
     model_list: Literal["all", "text"] = "all"
     verified: bool = False
     models: dict[str, list[str]] = Field(default_factory=dict)
+    # 实测过的向量模型 → 它的门槛。没写的模型用 app/search/vectors.py 里的默认值
+    embed_thresholds: dict[str, EmbedThresholds] = Field(default_factory=dict)
     note: str | None = None
 
 
@@ -148,15 +158,27 @@ class Settings(BaseModel):
             return self.classify
         return getattr(self, role)
 
+    def _provider_of(self, picked: RoleChoice) -> str | None:
+        """没选服务商、但只连了一家时就是那一家。"""
+        if not picked.provider and len(self.providers) == 1:
+            return next(iter(self.providers))
+        return picked.provider
+
+    def embed_thresholds(self) -> EmbedThresholds | None:
+        """当前向量模型实测过的门槛（providers.yaml）。没配向量模型、或者这个模型没实测过时返回 None。"""
+        provider = self._provider_of(self.embed)
+        info = provider_info(provider) if provider else None
+        if info is None or not self.embed.model:
+            return None
+        return info.embed_thresholds.get(self.embed.model)
+
     def endpoint(self, role: RoleName) -> Endpoint:
         """这个环节要调用的服务商和模型。缺什么就抛 RuntimeError，消息是给使用者看的。"""
         label = ROLE_LABEL[role]
         picked = self.choice(role)
         if not picked.model:
             raise RuntimeError(f"还没有选{label}：请到设置页选一个")
-        provider = picked.provider
-        if not provider and len(self.providers) == 1:
-            provider = next(iter(self.providers))
+        provider = self._provider_of(picked)
         if not provider:
             raise RuntimeError(f"还没有给{label}选服务商：请到设置页选一个")
         account = self.providers.get(provider)

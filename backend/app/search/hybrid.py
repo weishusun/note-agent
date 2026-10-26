@@ -16,12 +16,11 @@ from app.vault.models import NoteRef
 
 # 向量这一路最多取几条候选
 VECTOR_CANDIDATES = 12
-# 相似度低于这个数的不要：向量检索永远能排出「最接近的」几条，哪怕库里根本没有相关的笔记。
-# 不设下限的话，问一个库里没有的问题也会带回几条不相干的笔记，回答就不会老实说「知识库里没有」了。
-# 0.33 是对着智谱的向量模型实测定的：问题和相关笔记的相似度在 0.39–0.56，和不相干的笔记最高 0.23
-VECTOR_MIN_SCORE = 0.33
-# 也不要比第一名差太多的
-VECTOR_MARGIN = 0.12
+# 相似度门槛按向量模型取（VectorIndex.thresholds()）：
+# - floor：低于它的不要。向量检索永远能排出「最接近的」几条，哪怕库里根本没有相关的笔记；
+#   不设下限的话，问一个库里没有的问题也会带回几条不相干的笔记，回答就不会老实说「知识库里没有」了。
+#   智谱的向量模型实测：问题和相关笔记的相似度在 0.39–0.56，和不相干的笔记最高 0.23，定在 0.33
+# - margin：也不要比第一名差太多的
 # 名次合并（RRF）里的常数：越大，名次靠前的优势越小。60 是通用的取值
 _RRF_K = 60
 # 检索词扩展的词表：和问题最接近的这么多条，加上至多这么多条还没有向量的新笔记
@@ -61,7 +60,8 @@ def retrieve(
         return [ref for ref, _weak in ranked[:limit]]
 
     hits = vectors.search(query, VECTOR_CANDIDATES)
-    floor = max(VECTOR_MIN_SCORE, hits[0][1] - VECTOR_MARGIN) if hits else VECTOR_MIN_SCORE
+    limits = vectors.thresholds()
+    floor = max(limits.floor, hits[0][1] - limits.margin) if hits else limits.floor
     hits = [(path, score) for path, score in hits if score >= floor]
 
     # 字面检索里只靠正文碎片撞上的笔记，意思上也得沾边才留；还没有向量的新笔记不筛

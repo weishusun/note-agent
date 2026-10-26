@@ -132,7 +132,7 @@ def test_nothing_happens_without_an_embedding_model(
     assert vectors.wait_idle()
     assert (vectors.enabled(), vectors.sync(), embedder.calls) == (False, 0, [])
     assert vectors.embed_query("怎么微调") is None
-    assert vectors.status() == {"enabled": False, "model": None, "total": 1, "embedded": 0}
+    assert vectors.status() == {"enabled": False, "model": None, "total": 1, "embedded": 0, "calibrated": False}
 
 
 def test_new_notes_are_embedded_in_the_background(
@@ -143,7 +143,7 @@ def test_new_notes_are_embedded_in_the_background(
         "notes/快速排序.md": ("fake-embed", 5),
         "notes/RAG.md": ("fake-embed", 5),
     }
-    assert vectors.status() == {"enabled": True, "model": "fake-embed", "total": 3, "embedded": 3}
+    assert vectors.status() == {"enabled": True, "model": "fake-embed", "total": 3, "embedded": 3, "calibrated": False}
     # 没有变动：再同步一次不调用接口
     assert vectors.sync() == 0 and embedder.calls == []
 
@@ -302,6 +302,18 @@ def test_hybrid_puts_notes_found_both_ways_first(
     assert [r.title for r in retrieve(index, vectors, question, limit=1)] == ["SFT"]
 
 
+def test_hybrid_uses_the_thresholds_of_the_embedding_model(
+    index: SearchIndex, vectors: VectorIndex, notes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert vectors.thresholds() == vectors_module.DEFAULT_THRESHOLDS  # fake-embed 没实测过
+    question = "怎么教模型听指令"
+    assert [r.title for r in retrieve(index, vectors, question)] == ["SFT"]
+    # 换成一个尺度完全不同的模型：同样的相似度在它那里算不上相关
+    strict = settings.EmbedThresholds(floor=1.5, margin=0.12, duplicate=0.55)
+    monkeypatch.setattr(VectorIndex, "thresholds", staticmethod(lambda: strict))
+    assert retrieve(index, vectors, question) == []
+
+
 def test_hybrid_falls_back_to_lexical_when_the_query_cannot_be_embedded(
     index: SearchIndex, vectors: VectorIndex, embedder: Embedder, notes
 ) -> None:
@@ -336,6 +348,7 @@ def test_api_vectors_status_and_settings(
         "model": "fake-embed",
         "total": 1,
         "embedded": 1,
+        "calibrated": False,  # fake-embed 没实测过
     }
 
 

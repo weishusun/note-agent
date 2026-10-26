@@ -20,8 +20,8 @@ from app.vault.store import VaultStore
 
 logger = logging.getLogger(__name__)
 
-# 相似度不到这个数的不当候选。定得偏低：它只决定「要不要问模型一句」，是不是重复由模型说了算
-SIMILAR_MIN_SCORE = 0.55
+# 相似度不到 VectorIndex.thresholds().duplicate 的不当候选（按向量模型取）。
+# 定得偏低：它只决定「要不要问模型一句」，是不是重复由模型说了算
 # 每条新笔记最多拿几条已有笔记去问模型
 CANDIDATES_PER_NOTE = 2
 _SEARCH_POOL = 8
@@ -49,10 +49,11 @@ def find_similar(
 
     # 每条新笔记的候选：内容最接近的几条已有概念笔记
     candidates: list[tuple[int, NoteRef]] = []
+    least = vectors.thresholds().duplicate
     for i, vector in enumerate(embedded):
         if i < len(skip) and skip[i]:
             continue
-        hits = [(p, s) for p, s in vectors.search(vector, _SEARCH_POOL) if s >= SIMILAR_MIN_SCORE]
+        hits = [(p, s) for p, s in vectors.search(vector, _SEARCH_POOL) if s >= least]
         refs = {ref.path: ref for ref in refs_by_paths(vectors.index, [p for p, _ in hits])}
         close = [refs[p] for p, _ in hits if p in refs and refs[p].type == "concept" and refs[p].id]
         candidates += [(i, ref) for ref in close[:CANDIDATES_PER_NOTE]]
