@@ -55,6 +55,14 @@ export interface AskResult {
   rewritten: string | null
 }
 
+// 流式问答里先到的那部分：检索到了哪些笔记。回答随后一段段到
+export type AskFound = Omit<AskResult, "answer">
+
+export interface AskStreamHandlers {
+  onSources: (found: AskFound) => void
+  onDelta: (text: string) => void
+}
+
 export interface NoteDetail {
   frontmatter: {
     id: string | null
@@ -299,6 +307,67 @@ function send<T>(method: "POST" | "PUT", url: string, body: unknown): Promise<T>
 
 const post = <T,>(url: string, body: unknown) => send<T>("POST", url, body)
 
+// 边检索边回答（SCHEMA §5 POST /api/ask/stream）：sources、若干 delta，最后 done 或 error。
+// 返回处理过的完整回答；被 signal 中止时抛出的是 AbortError
+async function askStream(
+  question: string,
+  history: { question: string; answer: string }[],
+  handlers: AskStreamHandlers,
+  signal?: AbortSignal,
+): Promise<AskResult> {
+  let resp: Response
+  try {
+    resp = await fetch("/api/ask/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, history }),
+      signal,
+    })
+  } catch (err) {
+    if (signal?.aborted) throw err
+    throw new Error("连不上后端服务，请确认它已启动")
+  }
+  if (!resp.ok || !resp.body) throw new Error(await errorMessage(resp))
+
+  const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader()
+  let buffer = ""
+  let found: AskFound | null = null
+  for (;;) {
+    let chunk: ReadableStreamReadResult<string>
+    try {
+      chunk = await reader.read()
+    } catch (err) {
+      if (signal?.aborted) throw err
+      throw new Error("回答中断了，请重试")
+    }
+    if (chunk.done) break
+    buffer += chunk.value
+    // 事件之间隔一个空行
+    for (let cut = buffer.indexOf("\n\n"); cut >= 0; cut = buffer.indexOf("\n\n")) {
+      const block = buffer.slice(0, cut)
+      buffer = buffer.slice(cut + 2)
+      let event = ""
+      let data = ""
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event: ")) event = line.slice(7)
+        else if (line.startsWith("data: ")) data = line.slice(6)
+      }
+      const payload = JSON.parse(data)
+      if (event === "sources") {
+        found = payload as AskFound
+        handlers.onSources(found)
+      } else if (event === "delta") {
+        handlers.onDelta(payload.text)
+      } else if (event === "done" && found) {
+        return { ...found, answer: payload.answer }
+      } else if (event === "error") {
+        throw new Error(payload.detail)
+      }
+    }
+  }
+  throw new Error("回答中断了，请重试")
+}
+
 function query(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
@@ -322,6 +391,7 @@ export const api = {
   // history：这段对话里之前问完了的几轮（从早到晚）。带上它，这次的问题按追问处理
   ask: (question: string, history: { question: string; answer: string }[] = []) =>
     post<AskResult>("/api/ask", { question, history }),
+  askStream,
 
   notes: (filter: { category?: string; status?: "inbox"; duplicates?: "true" } = {}) =>
     request<NoteRef[]>(`/api/notes?${query({ ...filter, limit: 200 })}`),

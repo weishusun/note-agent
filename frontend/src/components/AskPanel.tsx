@@ -14,6 +14,8 @@ interface Exchange {
   id: number
   question: string
   result?: AskResult
+  // 还在生成的回答：检索到的笔记先到，回答一段段往上拼。答完由 result 接替
+  live?: AskResult
   error?: string
 }
 
@@ -49,6 +51,7 @@ export function AskPanel({
   const bottom = useRef<HTMLDivElement>(null)
   // 「新对话」之后，还在路上的那次回答回来时不该再冒出来
   const generation = useRef(0)
+  const inFlight = useRef<AbortController | null>(null)
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "nearest" })
@@ -76,14 +79,32 @@ export function AskPanel({
     setExchanges((prev) => [...prev, { id, question: q }])
     if (text === question) setQuestion("")
     setBusy(true)
-    const patch = await api
-      .ask(q, history)
-      .then((result) => ({ result }))
-      .catch((err: Error) => ({ error: err.message }))
-    if (mine === generation.current) {
-      setExchanges((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)))
+    const update = (change: (x: Exchange) => Partial<Exchange>) => {
+      if (mine !== generation.current) return
+      setExchanges((prev) => prev.map((x) => (x.id === id ? { ...x, ...change(x) } : x)))
     }
-    setBusy(false)
+    const controller = new AbortController()
+    inFlight.current = controller
+    try {
+      const result = await api.askStream(
+        q,
+        history,
+        {
+          onSources: (found) => update(() => ({ live: { ...found, answer: "" } })),
+          onDelta: (piece) =>
+            update((x) => (x.live ? { live: { ...x.live, answer: x.live.answer + piece } } : {})),
+        },
+        controller.signal,
+      )
+      update(() => ({ result, live: undefined }))
+    } catch (err) {
+      // 被「新对话」中止的不用报错：update 会因为 generation 变了而什么都不做
+      update(() => ({ error: (err as Error).message }))
+    }
+    if (mine === generation.current) {
+      inFlight.current = null
+      setBusy(false)
+    }
   }
 
   const lastRequest = useRef(0)
@@ -110,6 +131,8 @@ export function AskPanel({
 
   function startOver() {
     generation.current++
+    inFlight.current?.abort()
+    inFlight.current = null
     setExchanges([])
     setBusy(false)
   }
@@ -144,8 +167,11 @@ export function AskPanel({
           <h3 className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-muted px-3.5 py-2 text-sm whitespace-pre-wrap">
             {x.question}
           </h3>
-          {!x.result && !x.error && (
-            <p className="text-sm text-muted-foreground">正在检索并回答…</p>
+          {!x.result && !x.live && !x.error && (
+            <p className="animate-pulse text-sm text-muted-foreground">正在理解问题、检索笔记…</p>
+          )}
+          {!x.result && x.live && (
+            <Answer result={x.live} open streaming={!x.error} onOpenNote={onOpenNote} />
           )}
           {x.error && <Alert tone="error">{x.error}</Alert>}
           {x.result && (
@@ -182,10 +208,13 @@ export function AskPanel({
 function Answer({
   result,
   open,
+  streaming = false,
   onOpenNote,
 }: {
   result: AskResult
   open: boolean
+  // 回答还在一段段地来
+  streaming?: boolean
   onOpenNote: (note: NoteRef) => void
 }) {
   // 把回答里的 [1]、[2] 变成可点的引用；编号对不上来源的保持原样
@@ -194,6 +223,13 @@ function Answer({
     <>
       {!result.grounded && (
         <Alert tone="info">知识库里没有找到相关笔记，下面的回答来自模型自身的知识，未经核实。</Alert>
+      )}
+      {streaming && !result.answer && (
+        <p className="animate-pulse text-sm text-muted-foreground">
+          {result.sources.length > 0
+            ? `找到 ${result.sources.length} 条相关笔记，正在组织回答…`
+            : "正在组织回答…"}
+        </p>
       )}
       <p className="text-sm leading-relaxed whitespace-pre-wrap">
         {parts.map((part, i) => {
@@ -212,6 +248,9 @@ function Answer({
             </button>
           )
         })}
+        {streaming && result.answer && (
+          <span aria-hidden className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-foreground/60 align-text-bottom" />
+        )}
       </p>
       {(result.rewritten || result.keywords.length > 0) && (
         <p className="text-xs text-muted-foreground">
